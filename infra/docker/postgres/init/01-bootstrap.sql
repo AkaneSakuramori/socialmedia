@@ -13,6 +13,17 @@ ALTER SCHEMA public OWNER TO app;
 GRANT USAGE ON SCHEMA public TO migrator;
 GRANT CREATE ON SCHEMA public TO migrator;
 
+-- Migrations run as migrator, so any object they create is owned by migrator.
+-- Give app full DML on everything migrator creates from now on, so the runtime
+-- role can read/write (DATABASE.md). Applied retroactively to the live dev DB:
+--   GRANT USAGE ON SCHEMA public TO app;
+--   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app;
+--   GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app;
+ALTER DEFAULT PRIVILEGES FOR ROLE migrator IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app;
+ALTER DEFAULT PRIVILEGES FOR ROLE migrator IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO app;
+
 -- Shared extensions. These require superuser, so they are installed here (at
 -- first boot, running as POSTGRES_USER) rather than in migrations, which run
 -- under the unprivileged migrator role.

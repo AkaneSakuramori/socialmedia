@@ -37,6 +37,11 @@ func (f *fakeTx) Rollback(context.Context) error {
 	}
 	return nil
 }
+func (f *fakeTx) Exec(context.Context, string, ...any) (int64, error) { return 0, nil }
+func (f *fakeTx) QueryRow(context.Context, string, ...any) tx.Row      { return nil }
+func (f *fakeTx) Query(context.Context, string, ...any) (tx.Rows, error) {
+	return nil, nil
+}
 
 type fakeBeginner struct {
 	mu   sync.Mutex
@@ -161,7 +166,7 @@ func (r *fakeSessionRepo) FindByDeviceID(_ context.Context, userID int64, device
 	defer r.mu.Unlock()
 	for _, s := range r.sessions {
 		if s.UserID == userID && s.Device.DeviceID == deviceID {
-			return s, nil
+			return copySession(s), nil
 		}
 	}
 	return nil, domain.ErrSessionNotFound
@@ -182,6 +187,53 @@ func (r *fakeSessionRepo) Update(_ context.Context, _ tx.Tx, s *domain.Session) 
 	return domain.ErrSessionNotFound
 }
 
+func (r *fakeSessionRepo) FindByHash(_ context.Context, _ tx.Tx, hash string) (*domain.Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		if s.RefreshTokenHash == hash {
+			return copySession(s), nil
+		}
+	}
+	return nil, domain.ErrSessionNotFound
+}
+
+func (r *fakeSessionRepo) FindByPreviousHash(_ context.Context, _ tx.Tx, hash string) (*domain.Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		if s.RefreshTokenPreviousHash == hash {
+			return copySession(s), nil
+		}
+	}
+	return nil, domain.ErrSessionNotFound
+}
+
+func (r *fakeSessionRepo) Rotate(_ context.Context, _ tx.Tx, s *domain.Session, presentedHash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Compare-and-swap, like the SQL WHERE refresh_token_hash = presentedHash:
+	// a concurrent rotation already replaced the token -> no match.
+	for i, old := range r.sessions {
+		if old.ID == s.ID && old.RefreshTokenHash == presentedHash {
+			r.sessions[i] = s
+			return nil
+		}
+	}
+	return domain.ErrSessionNotFound
+}
+
+func (r *fakeSessionRepo) RevokeAllByUserID(_ context.Context, _ tx.Tx, userID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		if s.UserID == userID && s.State != domain.SessionRevoked {
+			s.State = domain.SessionRevoked
+		}
+	}
+	return nil
+}
+
 type fakeHasher struct{}
 
 func (fakeHasher) Hash(_ context.Context, plaintext string) (domain.PasswordHash, error) {
@@ -192,22 +244,34 @@ func (fakeHasher) Verify(_ context.Context, h domain.PasswordHash, plaintext str
 }
 
 type fakeTokenIssuer struct {
+	mu    sync.Mutex
 	err   error
 	nonce int
 }
 
 func (f *fakeTokenIssuer) IssuePair(_ context.Context, sessionID, userID int64, deviceID string, now time.Time) (domain.TokenPair, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return domain.TokenPair{}, f.err
 	}
 	f.nonce++
+	// 43-char base64url-safe value (domain.OpaqueTokenLen): the refresh shape
+	// gate (REFR-1) rejects anything shorter.
 	return domain.TokenPair{
 		AccessToken:      fmt.Sprintf("access.%d.%d", sessionID, f.nonce),
-		RefreshToken:     fmt.Sprintf("rt-%d-%d", f.nonce, sessionID),
+		RefreshToken:     fmt.Sprintf("rt-%040d", f.nonce),
 		JTI:              fmt.Sprintf("jti-%d", f.nonce),
 		AccessExpiresAt:  now.Add(15 * time.Minute),
 		RefreshExpiresAt: now.Add(30 * 24 * time.Hour),
 	}, nil
+}
+
+// copySession deep-copies a stored session so reads behave like a database
+// scan (callers mutate their own copy; Rotate is the atomic compare-and-swap).
+func copySession(s *domain.Session) *domain.Session {
+	c := *s
+	return &c
 }
 
 type fakeOTP struct {

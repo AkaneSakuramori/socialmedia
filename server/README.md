@@ -4,9 +4,10 @@ The InChat backend is a **modular monolith** (Go 1.24) following the finalized
 `architecture/` documents — `ENGINEERING.md` is the backend source of truth,
 `ARCHITECTURE.md` and `API.md` the contract, `ENGINEERING_RULES.md` the house law.
 
-> **Status:** Sprint 1 — account registration and login (password + OTP, with
-> AUTH-5 lockout) landed. Sessions, tokens, and the lockout store are in;
-> refresh rotation, device management, and delivery wiring are next.
+> **Status:** Sprint 1 — registration, login (password + OTP, AUTH-5 lockout),
+> and refresh-token rotation with reuse detection (REFR-4/5, API.md §4.4)
+> landed. Sessions, tokens, and the lockout store are in; device management
+> and delivery wiring are next.
 
 ## Stack
 
@@ -87,13 +88,16 @@ sources it. `config.String()` redacts passwords for safe logging.
 | `GET /healthz` | Liveness — process alive (independent of dependencies) |
 | `GET /readyz` | Readiness — PostgreSQL + Redis reachable; 503 while failing |
 
-Sprint 1 shipped the registration and login **use-cases and domain layer**
-(ports, Argon2id password hashing, Ed25519 JWT + opaque refresh-token factory,
-per-identifier login lockout over Redis, session/credential repositories,
+Sprint 1 shipped the registration, login, and refresh **use-cases and domain
+layer** (ports, Argon2id password hashing, Ed25519 JWT + opaque refresh-token
+factory, per-identifier login lockout over Redis, single-use refresh rotation
+with reuse detection and atomic CAS, session/credential repositories,
 `users`/`user_credentials`/`user_sessions` schema). The HTTP endpoints
-(`POST /v1/auth/register`, `POST /v1/auth/login`, …) arrive in the delivery
-milestone of Sprint 1 — until then the contract is exercised through
-`internal/auth/application` tests.
+(`POST /v1/auth/register`, `POST /v1/auth/login`, `POST /v1/auth/refresh`, …)
+arrive in the delivery milestone of Sprint 1 — until then the contract is
+exercised through `internal/auth/application` tests and build-tagged
+integration tests (`go test -tags integration ./internal/auth/infra/postgres/`,
+which need the dev PostgreSQL from `make dev-up`).
 
 Everything else returns the RFC 9457 `application/problem+json` 404 envelope
 (`code`, `title`, `status`, `detail`, `instance`, `request_id`, `retryable`).
@@ -123,7 +127,10 @@ make ci          # vet + race tests + build (the local gate)
 
 - Unit tests live beside their packages (`*_test.go`), hermetic and
   deterministic; `go test -race ./...` is the CI gate.
-- Integration tests that need PostgreSQL/Redis are future sprints (build-tagged).
+- Integration tests that need PostgreSQL are build-tagged (`integration`, see
+  `internal/auth/infra/postgres/session_repo_integration_test.go`) and skip
+  when the database is unreachable; they run against the dev stack via
+  `make dev-up` + `make migrate`.
 - Lint: `golangci-lint run ./...` (config in `.golangci.yml`), fallback `go vet`.
 - CI (`.github/workflows/ci.yml`): vet → golangci-lint → race+coverage → build →
   govulncheck → gitleaks → trivy.

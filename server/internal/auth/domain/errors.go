@@ -21,6 +21,14 @@ var (
 	ErrUnsupportedLoginMethod = errors.New("auth: unsupported login method")
 	// ErrSessionNotFound means no session row matches the query.
 	ErrSessionNotFound = errors.New("auth: session not found")
+	// ErrRefreshTokenInvalid means the presented refresh token is malformed,
+	// unknown, expired, or belongs to a revoked session (API.md §4.4 →
+	// 401 REFRESH_TOKEN_INVALID).
+	ErrRefreshTokenInvalid = errors.New("auth: refresh token invalid")
+	// ErrRefreshTokenReuse means a rotated-out token was presented — a theft
+	// signal. All sessions for the user have been revoked (REFR-5 → 410
+	// REFRESH_TOKEN_REUSE).
+	ErrRefreshTokenReuse = errors.New("auth: refresh token reuse detected")
 )
 
 // AccountLockedError reports an active lockout (SECURITY_SPEC.md AUTH-5 →

@@ -180,8 +180,10 @@ func (s *service) upsertSession(ctx context.Context, userID int64, device domain
 
 	var session *domain.Session
 	if existing != nil {
-		// Rotate in place: bump the family, reactivate, refresh metadata.
+		// Rotate in place: the old refresh token becomes the "previous" one
+		// (detectable as reuse), the family bumps, metadata refreshes.
 		session = existing
+		session.RefreshTokenPreviousHash = session.RefreshTokenHash
 		session.State = domain.SessionActive
 		session.RefreshTokenFamily++
 		session.Device = device
@@ -212,6 +214,7 @@ func (s *service) upsertSession(ctx context.Context, userID int64, device domain
 		return nil, domain.TokenPair{}, fmt.Errorf("auth: issue tokens: %w", err)
 	}
 	session.RefreshTokenHash = domain.HashOpaqueToken(pair.RefreshToken)
+	session.RefreshExpiresAt = pair.RefreshExpiresAt
 
 	if existing != nil {
 		if err := s.deps.Sessions.Update(ctx, dbtx, session); err != nil {

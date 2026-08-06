@@ -56,16 +56,18 @@ func ValidateDeviceID(id string) error {
 
 // Session is one device session — the session registry row (DATABASE.md §4.4).
 type Session struct {
-	ID                 int64
-	UserID             int64
-	Device             DeviceInfo
-	PushToken          *string
-	RefreshTokenFamily int64
-	RefreshTokenHash   string
-	IPAddress          *string
-	UserAgent          *string
-	LastActiveAt       time.Time
-	State              SessionState
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	ID                       int64
+	UserID                   int64
+	Device                   DeviceInfo
+	PushToken                *string
+	RefreshTokenFamily       int64
+	RefreshTokenHash         string
+	RefreshTokenPreviousHash string
+	RefreshExpiresAt         time.Time
+	IPAddress                *string
+	UserAgent                *string
+	LastActiveAt             time.Time
+	State                    SessionState
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }

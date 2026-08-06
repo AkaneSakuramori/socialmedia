@@ -162,6 +162,7 @@ func (s *service) createSession(ctx context.Context, dbtx tx.Tx, userID int64, d
 		UserID:           userID,
 		Device:           device,
 		RefreshTokenHash: domain.HashOpaqueToken(pair.RefreshToken),
+		RefreshExpiresAt: pair.RefreshExpiresAt,
 		IPAddress:        ip,
 		UserAgent:        userAgent,
 		LastActiveAt:     now,

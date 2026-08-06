@@ -27,6 +27,23 @@ type SessionRepository interface {
 	// Update persists the mutable session fields (state, refresh family/hash,
 	// last_active_at, ip, user_agent, push token).
 	Update(ctx context.Context, dbtx tx.Tx, s *Session) error
+	// FindByHash returns the session whose current refresh-token hash matches,
+	// or ErrSessionNotFound. Implementations lock the row
+	// (SELECT ... FOR UPDATE) so concurrent refreshes of the same token
+	// serialize at the database (REFR-4 single-use).
+	FindByHash(ctx context.Context, dbtx tx.Tx, hash string) (*Session, error)
+	// FindByPreviousHash returns the session whose previous refresh-token hash
+	// matches (a rotated-out token), or ErrSessionNotFound.
+	FindByPreviousHash(ctx context.Context, dbtx tx.Tx, hash string) (*Session, error)
+	// Rotate atomically transitions the session from its current refresh token
+	// to s.RefreshTokenHash. It returns ErrSessionNotFound when s.ID no longer
+	// holds presentedHash (a concurrent rotation won the race). Previous hash,
+	// family and expiry are updated in the same statement, so the rotate is a
+	// compare-and-swap.
+	Rotate(ctx context.Context, dbtx tx.Tx, s *Session, presentedHash string) error
+	// RevokeAllByUserID revokes every active session of the user
+	// (SECURITY_SPEC.md REFR-5: theft response).
+	RevokeAllByUserID(ctx context.Context, dbtx tx.Tx, userID int64) error
 }
 
 // LoginMethod is a supported credential method for login (API.md §4.3).

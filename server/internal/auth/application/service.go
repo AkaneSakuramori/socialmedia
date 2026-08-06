@@ -25,6 +25,10 @@ type Service interface {
 	// session bound to the device with a fresh token pair (API.md §4.3).
 	// Failed attempts are throttled per identifier (AUTH-5).
 	Login(ctx context.Context, cmd LoginCommand) (*LoginResult, error)
+	// Refresh rotates the session's access and refresh tokens (API.md §4.4,
+	// REFR-4). Presenting a rotated-out token revokes all sessions and
+	// returns ErrRefreshTokenReuse (REFR-5).
+	Refresh(ctx context.Context, cmd RefreshCommand) (*RefreshResult, error)
 }
 
 // LoginCommand is the validated input for authentication (API.md §4.3).
@@ -46,6 +50,23 @@ type LoginResult struct {
 	User      userdomain.User
 	Session   domain.Session
 	TokenPair domain.TokenPair
+}
+
+// RefreshCommand is the input to token rotation (API.md §4.4). RefreshToken is
+// the opaque token delivered via the X-Refresh-Token header, never in bodies.
+type RefreshCommand struct {
+	RefreshToken string
+	IPAddress    *string
+	UserAgent    *string
+}
+
+// RefreshResult is the rotated credential set (API.md §4.4 response shape:
+// access_token, expires_in, refresh_token, session_id).
+type RefreshResult struct {
+	AccessToken  string
+	RefreshToken string
+	SessionID    int64
+	ExpiresIn    int64 // seconds until the access token expires
 }
 
 // RegisterCommand is the validated input for account creation (API.md §4.1).
