@@ -54,6 +54,19 @@ func ValidateDeviceID(id string) error {
 	return nil
 }
 
+// ValidateDeviceName checks a user-chosen device label for the device
+// management screen (DATABASE.md §4.4 device_name). It returns
+// *ValidationError{Field: "device_name"} on failure.
+func ValidateDeviceName(name string) error {
+	if name == "" {
+		return &ValidationError{Field: "device_name", Reason: "required"}
+	}
+	if len(name) > 64 {
+		return &ValidationError{Field: "device_name", Reason: "too_long"}
+	}
+	return nil
+}
+
 // Session is one device session — the session registry row (DATABASE.md §4.4).
 type Session struct {
 	ID                       int64

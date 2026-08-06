@@ -129,6 +129,113 @@ func (r *SessionRepo) RevokeAllByUserID(ctx context.Context, dbtx tx.Tx, userID 
 	return err
 }
 
+// ListByUser returns the user's active sessions (API.md §4.7), newest first.
+func (r *SessionRepo) ListByUser(ctx context.Context, userID int64) ([]domain.Session, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT `+sessionColumns+`
+		FROM user_sessions
+		WHERE user_id = $1 AND state = 'active'
+		ORDER BY last_active_at DESC, id DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Session
+	for rows.Next() {
+		s, err := scanSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *s)
+	}
+	return out, rows.Err()
+}
+
+// FindByID returns a session, locking the row so read-then-write session
+// administration serializes at the database.
+func (r *SessionRepo) FindByID(ctx context.Context, dbtx tx.Tx, sessionID int64) (*domain.Session, error) {
+	row := dbtx.QueryRow(ctx, `
+		SELECT `+sessionColumns+`
+		FROM user_sessions WHERE id = $1
+		FOR UPDATE`,
+		sessionID)
+	return scanSession(row)
+}
+
+// RevokeByID atomically revokes one active session of the user (SESS-3: the
+// ownership check lives in the WHERE clause).
+func (r *SessionRepo) RevokeByID(ctx context.Context, dbtx tx.Tx, userID, sessionID int64) error {
+	n, err := dbtx.Exec(ctx, `
+		UPDATE user_sessions SET state = 'revoked', updated_at = now()
+		WHERE id = $1 AND user_id = $2 AND state <> 'revoked'`,
+		sessionID, userID)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return domain.ErrSessionNotFound
+	}
+	return nil
+}
+
+// RevokeOthersByUserID revokes every active session of the user except the
+// caller's current one.
+func (r *SessionRepo) RevokeOthersByUserID(ctx context.Context, dbtx tx.Tx, userID, keepSessionID int64) error {
+	_, err := dbtx.Exec(ctx, `
+		UPDATE user_sessions SET state = 'revoked', updated_at = now()
+		WHERE user_id = $1 AND id <> $2 AND state <> 'revoked'`,
+		userID, keepSessionID)
+	return err
+}
+
+// Rename updates the device label of an active session owned by the user.
+func (r *SessionRepo) Rename(ctx context.Context, dbtx tx.Tx, userID, sessionID int64, name string) error {
+	n, err := dbtx.Exec(ctx, `
+		UPDATE user_sessions SET device_name = $3, updated_at = now()
+		WHERE id = $1 AND user_id = $2 AND state = 'active'`,
+		sessionID, userID, name)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return domain.ErrSessionNotFound
+	}
+	return nil
+}
+
+// ExpireIdle transitions idle active sessions to 'expired' (SESS-9 sliding
+// idle timeout; REFR-6 refresh-window expiry). Single statement, so concurrent
+// invocations are safe.
+func (r *SessionRepo) ExpireIdle(ctx context.Context, now time.Time, idleTimeout time.Duration) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE user_sessions SET state = 'expired', updated_at = now()
+		WHERE state = 'active'
+		  AND (
+		    last_active_at <= $1
+		    OR (refresh_expires_at IS NOT NULL AND refresh_expires_at <= $2)
+		  )`,
+		now.Add(-idleTimeout), now)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// Purge deletes revoked/expired rows last changed before the cutoff
+// (DATABASE.md §4.4 retention).
+func (r *SessionRepo) Purge(ctx context.Context, cutoff time.Time) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `
+		DELETE FROM user_sessions
+		WHERE state IN ('revoked', 'expired') AND updated_at <= $1`,
+		cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // scanSession maps a row to the domain Session.
 func scanSession(row tx.Row) (*domain.Session, error) {
 	var s domain.Session

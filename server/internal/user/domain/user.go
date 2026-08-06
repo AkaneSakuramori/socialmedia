@@ -39,8 +39,12 @@ type User struct {
 	Email             *string
 	AccountState      AccountState
 	PrimaryIdentifier PrimaryIdentifier
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// TokenVersion is the account's global token version (users.token_version,
+	// SECURITY_SPEC.md SESS-6). Sign-out-everywhere bumps it so outstanding
+	// access tokens — which carry this value — fail at the gateway (JWT-5).
+	TokenVersion int64
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // UserRepository owns persistence for the User aggregate (ENGINEERING.md §6).
@@ -63,4 +67,8 @@ type UserRepository interface {
 	// UsernameTaken reports whether the username is held by a non-deleted
 	// account (API.md §4.1 → 409 USERNAME_TAKEN).
 	UsernameTaken(ctx context.Context, username string) (bool, error)
+	// BumpTokenVersion atomically increments the account's global token
+	// version and returns the new value (SESS-6: sign-out-everywhere). Callers
+	// do this in the same transaction that revokes the sessions.
+	BumpTokenVersion(ctx context.Context, dbtx tx.Tx, userID int64) (int64, error)
 }

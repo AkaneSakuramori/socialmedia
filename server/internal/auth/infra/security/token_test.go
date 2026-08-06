@@ -59,7 +59,7 @@ func TestIssuePairAndVerifyAccess(t *testing.T) {
 	f, _ := newTestFactory(t)
 	now := time.Now()
 
-	pair, err := f.IssuePair(t.Context(), 7001, 1001, "d-abc", now)
+	pair, err := f.IssuePair(t.Context(), 7001, 1001, "d-abc", 7, now)
 	if err != nil {
 		t.Fatalf("IssuePair error: %v", err)
 	}
@@ -96,6 +96,9 @@ func TestIssuePairAndVerifyAccess(t *testing.T) {
 	if claims.JTI != pair.JTI {
 		t.Errorf("claims.JTI = %q, want %q", claims.JTI, pair.JTI)
 	}
+	if claims.TokenVersion != 7 {
+		t.Errorf("claims.TokenVersion = %d, want 7 (SESS-6 ver claim)", claims.TokenVersion)
+	}
 	if !claims.ExpiresAt.Equal(now.Add(15 * time.Minute).Truncate(time.Second)) {
 		t.Errorf("claims.ExpiresAt = %v", claims.ExpiresAt)
 	}
@@ -111,7 +114,7 @@ func TestVerifyAccessRejectsWrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTokenFactory error: %v", err)
 	}
-	pair, _ := f.IssuePair(t.Context(), 1, 1, "d", time.Now())
+	pair, _ := f.IssuePair(t.Context(), 1, 1, "d", 0, time.Now())
 	if _, err := other.VerifyAccess(pair.AccessToken); err == nil {
 		t.Fatal("VerifyAccess with a different key should fail")
 	}
@@ -120,12 +123,12 @@ func TestVerifyAccessRejectsWrongKey(t *testing.T) {
 func TestVerifyAccessRejectsExpired(t *testing.T) {
 	f, _ := newTestFactory(t)
 	now := time.Now()
-	pair, _ := f.IssuePair(t.Context(), 1, 1, "d", now)
+	pair, _ := f.IssuePair(t.Context(), 1, 1, "d", 0, now)
 	if _, err := f.VerifyAccess(pair.AccessToken); err != nil {
 		t.Fatalf("VerifyAccess on fresh token error: %v", err)
 	}
 	// A token issued 16 minutes ago is already expired against its own exp.
-	pair, _ = f.IssuePair(t.Context(), 1, 1, "d", now.Add(-16*time.Minute))
+	pair, _ = f.IssuePair(t.Context(), 1, 1, "d", 0, now.Add(-16*time.Minute))
 	if _, err := f.VerifyAccess(pair.AccessToken); err == nil {
 		t.Fatal("VerifyAccess on expired token should fail")
 	}
@@ -141,7 +144,7 @@ func TestVerifyAccessRejectsWrongIssuer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTokenFactory error: %v", err)
 	}
-	pair, _ := other.IssuePair(t.Context(), 1, 1, "d", time.Now())
+	pair, _ := other.IssuePair(t.Context(), 1, 1, "d", 0, time.Now())
 	if _, err := f.VerifyAccess(pair.AccessToken); err == nil {
 		t.Fatal("VerifyAccess with a different issuer should fail")
 	}
@@ -149,7 +152,7 @@ func TestVerifyAccessRejectsWrongIssuer(t *testing.T) {
 
 func TestVerifyAccessRejectsTampered(t *testing.T) {
 	f, _ := newTestFactory(t)
-	pair, _ := f.IssuePair(t.Context(), 1, 1, "d", time.Now())
+	pair, _ := f.IssuePair(t.Context(), 1, 1, "d", 0, time.Now())
 	parts := strings.Split(pair.AccessToken, ".")
 	parts[2] = strings.Repeat("A", len(parts[2]))
 	tampered := strings.Join(parts, ".")
@@ -161,8 +164,8 @@ func TestVerifyAccessRejectsTampered(t *testing.T) {
 func TestIssuePairProducesDistinctRefreshTokens(t *testing.T) {
 	f, _ := newTestFactory(t)
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
-	a, _ := f.IssuePair(t.Context(), 1, 1, "d", now)
-	b, _ := f.IssuePair(t.Context(), 1, 1, "d", now)
+	a, _ := f.IssuePair(t.Context(), 1, 1, "d", 0, now)
+	b, _ := f.IssuePair(t.Context(), 1, 1, "d", 0, now)
 	if a.RefreshToken == b.RefreshToken {
 		t.Fatal("two issued refresh tokens must differ")
 	}

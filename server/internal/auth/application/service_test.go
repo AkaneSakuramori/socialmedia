@@ -20,12 +20,17 @@ type fakeTx struct {
 	committed  bool
 	rolledBack bool
 	mu         sync.Mutex
+	onCommit   []func()
 }
 
 func (f *fakeTx) Commit(context.Context) error {
 	f.mu.Lock()
 	f.committed = true
+	hooks := f.onCommit
 	f.mu.Unlock()
+	for _, fn := range hooks {
+		fn()
+	}
 	return nil
 }
 func (f *fakeTx) Rollback(context.Context) error {
@@ -41,6 +46,14 @@ func (f *fakeTx) Exec(context.Context, string, ...any) (int64, error) { return 0
 func (f *fakeTx) QueryRow(context.Context, string, ...any) tx.Row      { return nil }
 func (f *fakeTx) Query(context.Context, string, ...any) (tx.Rows, error) {
 	return nil, nil
+}
+
+// OnCommit registers a hook run when the transaction commits — lets fakes
+// model real database atomicity (a change only becomes visible on commit).
+func (f *fakeTx) OnCommit(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onCommit = append(f.onCommit, fn)
 }
 
 type fakeBeginner struct {
@@ -128,6 +141,21 @@ func (r *fakeUserRepo) UsernameTaken(_ context.Context, u string) (bool, error) 
 	return ok, nil
 }
 
+func (r *fakeUserRepo) BumpTokenVersion(_ context.Context, dbtx tx.Tx, userID int64) (int64, error) {
+	u, ok := r.byID[userID]
+	if !ok {
+		return 0, userdomain.ErrUserNotFound
+	}
+	// Model transactional atomicity: the increment becomes visible only when
+	// the transaction commits (a rolled-back bump must not survive).
+	if ft, ok := dbtx.(*fakeTx); ok {
+		ft.OnCommit(func() { u.TokenVersion++ })
+		return u.TokenVersion + 1, nil
+	}
+	u.TokenVersion++
+	return u.TokenVersion, nil
+}
+
 type fakeCredRepo struct {
 	creds []*domain.Credential
 	mu    sync.Mutex
@@ -151,6 +179,7 @@ func (r *fakeCredRepo) FindPassword(_ context.Context, userID int64) (*domain.Cr
 type fakeSessionRepo struct {
 	sessions  []*domain.Session
 	updateErr error
+	revokeErr error
 	mu        sync.Mutex
 }
 
@@ -226,12 +255,119 @@ func (r *fakeSessionRepo) Rotate(_ context.Context, _ tx.Tx, s *domain.Session, 
 func (r *fakeSessionRepo) RevokeAllByUserID(_ context.Context, _ tx.Tx, userID int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.revokeErr != nil {
+		return r.revokeErr
+	}
 	for _, s := range r.sessions {
 		if s.UserID == userID && s.State != domain.SessionRevoked {
 			s.State = domain.SessionRevoked
 		}
 	}
 	return nil
+}
+
+func (r *fakeSessionRepo) ListByUser(_ context.Context, userID int64) ([]domain.Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []domain.Session
+	for _, s := range r.sessions {
+		if s.UserID == userID && s.State == domain.SessionActive {
+			out = append(out, *copySession(s))
+		}
+	}
+	// newest activity first (like the SQL ORDER BY last_active_at DESC)
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j].LastActiveAt.After(out[j-1].LastActiveAt); j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out, nil
+}
+
+func (r *fakeSessionRepo) FindByID(_ context.Context, _ tx.Tx, sessionID int64) (*domain.Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		if s.ID == sessionID {
+			return copySession(s), nil
+		}
+	}
+	return nil, domain.ErrSessionNotFound
+}
+
+func (r *fakeSessionRepo) RevokeByID(_ context.Context, _ tx.Tx, userID, sessionID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		if s.ID == sessionID && s.UserID == userID {
+			if s.State != domain.SessionRevoked {
+				s.State = domain.SessionRevoked
+				return nil
+			}
+			return domain.ErrSessionNotFound
+		}
+	}
+	return domain.ErrSessionNotFound
+}
+
+func (r *fakeSessionRepo) RevokeOthersByUserID(_ context.Context, _ tx.Tx, userID, keepSessionID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		if s.UserID == userID && s.ID != keepSessionID && s.State != domain.SessionRevoked {
+			s.State = domain.SessionRevoked
+		}
+	}
+	return nil
+}
+
+func (r *fakeSessionRepo) Rename(_ context.Context, _ tx.Tx, userID, sessionID int64, name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		if s.ID == sessionID && s.UserID == userID && s.State == domain.SessionActive {
+			n := name
+			s.Device.DeviceName = &n
+			return nil
+		}
+	}
+	return domain.ErrSessionNotFound
+}
+
+func (r *fakeSessionRepo) ExpireIdle(_ context.Context, now time.Time, idleTimeout time.Duration) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	cutoff := now.Add(-idleTimeout)
+	for _, s := range r.sessions {
+		if s.State != domain.SessionActive {
+			continue
+		}
+		idle := !s.LastActiveAt.After(cutoff)
+		expired := !s.RefreshExpiresAt.IsZero() && !s.RefreshExpiresAt.After(now)
+		if idle || expired {
+			s.State = domain.SessionExpired
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (r *fakeSessionRepo) Purge(_ context.Context, cutoff time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	kept := r.sessions[:0]
+	for _, s := range r.sessions {
+		old := s.State == domain.SessionRevoked || s.State == domain.SessionExpired
+		if old && !s.UpdatedAt.After(cutoff) {
+			n++
+			continue
+		}
+		kept = append(kept, s)
+	}
+	r.sessions = kept
+	return n, nil
 }
 
 type fakeHasher struct{}
@@ -247,15 +383,19 @@ type fakeTokenIssuer struct {
 	mu    sync.Mutex
 	err   error
 	nonce int
+	// lastVersion records the tokenVersion passed to the most recent
+	// IssuePair, for asserting the SESS-6 version flow.
+	lastVersion int64
 }
 
-func (f *fakeTokenIssuer) IssuePair(_ context.Context, sessionID, userID int64, deviceID string, now time.Time) (domain.TokenPair, error) {
+func (f *fakeTokenIssuer) IssuePair(_ context.Context, sessionID, userID int64, deviceID string, tokenVersion int64, now time.Time) (domain.TokenPair, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return domain.TokenPair{}, f.err
 	}
 	f.nonce++
+	f.lastVersion = tokenVersion
 	// 43-char base64url-safe value (domain.OpaqueTokenLen): the refresh shape
 	// gate (REFR-1) rejects anything shorter.
 	return domain.TokenPair{
@@ -391,18 +531,20 @@ func newHarness(t *testing.T) *harness {
 	}
 	h.begin = &fakeBeginner{}
 	h.svc = New(Deps{
-		Users:       h.users,
-		Credentials: h.creds,
-		Sessions:    h.sess,
-		Hasher:      fakeHasher{},
-		Tokens:      h.tokens,
-		OTP:         h.otp,
-		Throttle:    h.throttle,
-		Policy:      domain.DefaultLoginPolicy(),
-		Audit:       h.audit,
-		IDs:         h.ids,
-		TxBeginner:  h.begin,
-		Clock:       h.clk,
+		Users:              h.users,
+		Credentials:        h.creds,
+		Sessions:           h.sess,
+		Hasher:             fakeHasher{},
+		Tokens:             h.tokens,
+		OTP:                h.otp,
+		Throttle:           h.throttle,
+		Policy:             domain.DefaultLoginPolicy(),
+		Audit:              h.audit,
+		IDs:                h.ids,
+		TxBeginner:         h.begin,
+		Clock:              h.clk,
+		SessionIdleTimeout: 30 * 24 * time.Hour,
+		SessionRetention:   90 * 24 * time.Hour,
 	})
 	return h
 }

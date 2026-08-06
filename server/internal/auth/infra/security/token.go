@@ -57,27 +57,31 @@ func NewTokenFactory(cfg TokenConfig) (*TokenFactory, error) {
 }
 
 // accessClaims carries the JWT-2 required claims. sub holds the user id as a
-// string (API.md §2.2: ids serialize as strings).
+// string (API.md §2.2: ids serialize as strings). ver is the user's global
+// token version (SESS-6): gateways reject tokens whose ver is older than the
+// account's current users.token_version (JWT-5).
 type accessClaims struct {
-	SessionID int64    `json:"sid"`
-	DeviceID  string   `json:"dev"`
-	Scopes    []string `json:"scopes"`
+	SessionID    int64    `json:"sid"`
+	DeviceID     string   `json:"dev"`
+	Scopes       []string `json:"scopes"`
+	TokenVersion int64    `json:"ver"`
 	jwt.RegisteredClaims
 }
 
 // IssuePair mints an access JWT and an opaque refresh token for a session
 // (ARCHITECTURE.md §10.2). The raw refresh token is returned once; callers
 // persist only domain.HashOpaqueToken(refreshToken) (REFR-2).
-func (t *TokenFactory) IssuePair(_ context.Context, sessionID, userID int64, deviceID string, now time.Time) (domain.TokenPair, error) {
+func (t *TokenFactory) IssuePair(_ context.Context, sessionID, userID int64, deviceID string, tokenVersion int64, now time.Time) (domain.TokenPair, error) {
 	jti, err := newJTI()
 	if err != nil {
 		return domain.TokenPair{}, fmt.Errorf("token: generate jti: %w", err)
 	}
 
 	claims := accessClaims{
-		SessionID: sessionID,
-		DeviceID:  deviceID,
-		Scopes:    []string{"user"},
+		SessionID:    sessionID,
+		DeviceID:     deviceID,
+		Scopes:       []string{"user"},
+		TokenVersion: tokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   fmt.Sprintf("%d", userID),
 			Issuer:    t.issuer,
@@ -114,12 +118,16 @@ type AccessClaims struct {
 	DeviceID  string
 	Scopes    []string
 	JTI       string
-	ExpiresAt time.Time
+	// TokenVersion is the ver claim — the user's global token version at
+	// issuance. Gateways compare it against users.token_version (JWT-5).
+	TokenVersion int64
+	ExpiresAt    time.Time
 }
 
 // VerifyAccess validates signature, method, issuer, audience, and expiry, and
 // returns the claims. This is the gateway trust boundary check
-// (SECURITY_SPEC.md JWT-5); session-validity is checked separately.
+// (SECURITY_SPEC.md JWT-5); session-validity and token version are checked
+// separately.
 func (t *TokenFactory) VerifyAccess(token string) (*AccessClaims, error) {
 	claims := &accessClaims{}
 	parsed, err := jwt.ParseWithClaims(token, claims, func(*jwt.Token) (any, error) {
@@ -142,12 +150,13 @@ func (t *TokenFactory) VerifyAccess(token string) (*AccessClaims, error) {
 		return nil, fmt.Errorf("token: subject: %w", err)
 	}
 	return &AccessClaims{
-		UserID:    uid,
-		SessionID: claims.SessionID,
-		DeviceID:  claims.DeviceID,
-		Scopes:    claims.Scopes,
-		JTI:       claims.ID,
-		ExpiresAt: claims.ExpiresAt.Time,
+		UserID:       uid,
+		SessionID:    claims.SessionID,
+		DeviceID:     claims.DeviceID,
+		Scopes:       claims.Scopes,
+		JTI:          claims.ID,
+		TokenVersion: claims.TokenVersion,
+		ExpiresAt:    claims.ExpiresAt.Time,
 	}, nil
 }
 

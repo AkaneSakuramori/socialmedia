@@ -29,6 +29,10 @@ var (
 	// signal. All sessions for the user have been revoked (REFR-5 → 410
 	// REFRESH_TOKEN_REUSE).
 	ErrRefreshTokenReuse = errors.New("auth: refresh token reuse detected")
+	// ErrSessionNotOwned means the session exists but belongs to another user.
+	// A caller may only administer its own sessions (SECURITY_SPEC.md SESS-3,
+	// API.md §4.8 → 403 NOT_SESSION_OWNER).
+	ErrSessionNotOwned = errors.New("auth: session belongs to another user")
 )
 
 // AccountLockedError reports an active lockout (SECURITY_SPEC.md AUTH-5 →

@@ -102,7 +102,7 @@ func (s *service) Login(ctx context.Context, cmd LoginCommand) (*LoginResult, er
 	}
 
 	now := s.now()
-	session, pair, err := s.upsertSession(ctx, user.ID, cmd.Device, cmd.IPAddress, cmd.UserAgent, now)
+	session, pair, err := s.upsertSession(ctx, user.ID, cmd.Device, cmd.IPAddress, cmd.UserAgent, now, user.TokenVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +166,7 @@ func (s *service) verifyCredential(ctx context.Context, user *userdomain.User, i
 // upsertSession binds a login to the device (API.md §4.3): reuse the existing
 // (user_id, device_id) row by rotating its refresh token and family, or create
 // a new one. Everything happens in one transaction (DATABASE.md §10).
-func (s *service) upsertSession(ctx context.Context, userID int64, device domain.DeviceInfo, ip, userAgent *string, now time.Time) (*domain.Session, domain.TokenPair, error) {
+func (s *service) upsertSession(ctx context.Context, userID int64, device domain.DeviceInfo, ip, userAgent *string, now time.Time, tokenVersion int64) (*domain.Session, domain.TokenPair, error) {
 	dbtx, err := s.deps.TxBeginner.Begin(ctx)
 	if err != nil {
 		return nil, domain.TokenPair{}, fmt.Errorf("auth: begin tx: %w", err)
@@ -209,7 +209,7 @@ func (s *service) upsertSession(ctx context.Context, userID int64, device domain
 		}
 	}
 
-	pair, err := s.deps.Tokens.IssuePair(ctx, session.ID, userID, device.DeviceID, now)
+	pair, err := s.deps.Tokens.IssuePair(ctx, session.ID, userID, device.DeviceID, tokenVersion, now)
 	if err != nil {
 		return nil, domain.TokenPair{}, fmt.Errorf("auth: issue tokens: %w", err)
 	}

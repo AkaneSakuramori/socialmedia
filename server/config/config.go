@@ -65,6 +65,13 @@ type Config struct {
 	LoginMaxFailures int
 	// LoginLockoutDuration is how long an identifier stays locked (AUTH-5).
 	LoginLockoutDuration time.Duration
+	// SessionIdleTimeout is how long a session may stay inactive before it
+	// expires (SECURITY_SPEC.md SESS-9 sliding idle timeout). Must be <=
+	// RefreshTokenTTL so the sliding window cannot outlive the refresh TTL.
+	SessionIdleTimeout time.Duration
+	// SessionRetention is how long revoked/expired session rows are kept before
+	// purge (DATABASE.md §4.4 retention: 90 days).
+	SessionRetention time.Duration
 }
 
 // Defaults for local development. Deployed environments override via env vars.
@@ -89,6 +96,8 @@ const (
 	defaultArgon2Threads    = 4
 	defaultLoginMaxFailures = 5
 	defaultLoginLockout     = 5 * time.Minute
+	defaultSessionIdle      = 30 * 24 * time.Hour
+	defaultSessionRetention = 90 * 24 * time.Hour
 )
 
 // Load reads configuration from the environment, applies defaults, and
@@ -116,6 +125,8 @@ func Load() (Config, error) {
 		IDGenNodeID:          getInt("APP_IDGEN_NODE_ID", 0),
 		LoginMaxFailures:     getInt("APP_LOGIN_MAX_FAILURES", defaultLoginMaxFailures),
 		LoginLockoutDuration: getDuration("APP_LOGIN_LOCKOUT_DURATION", defaultLoginLockout),
+		SessionIdleTimeout:   getDuration("APP_SESSION_IDLE_TIMEOUT", defaultSessionIdle),
+		SessionRetention:     getDuration("APP_SESSION_RETENTION", defaultSessionRetention),
 	}
 
 	// Local dev convenience: a default DSN matching the compose stack.
@@ -201,6 +212,15 @@ func (c Config) Validate() error {
 	if c.LoginLockoutDuration <= 0 {
 		errs = append(errs, "APP_LOGIN_LOCKOUT_DURATION must be > 0")
 	}
+	if c.SessionIdleTimeout <= 0 {
+		errs = append(errs, "APP_SESSION_IDLE_TIMEOUT must be > 0")
+	}
+	if c.SessionIdleTimeout > c.RefreshTokenTTL {
+		errs = append(errs, "APP_SESSION_IDLE_TIMEOUT must not exceed APP_REFRESH_TOKEN_TTL (sliding window)")
+	}
+	if c.SessionRetention <= 0 {
+		errs = append(errs, "APP_SESSION_RETENTION must be > 0")
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(errs, "\n  - "))
@@ -227,12 +247,13 @@ func (c Config) String() string {
 		key = "xxxxx"
 	}
 	return fmt.Sprintf(
-		"{AppEnv:%s HTTPPort:%s ReadHeaderTimeout:%s ShutdownTimeout:%s PGDSN:%s PGMaxConns:%d RedisAddr:%s RedisPassword:%s RedisDB:%d JWTIssuer:%s JWTAudience:%s JWTPrivateKey:%s AccessTokenTTL:%s RefreshTokenTTL:%s Argon2:%d/%d/%d IDGenNodeID:%d LoginPolicy:%d/%s}",
+		"{AppEnv:%s HTTPPort:%s ReadHeaderTimeout:%s ShutdownTimeout:%s PGDSN:%s PGMaxConns:%d RedisAddr:%s RedisPassword:%s RedisDB:%d JWTIssuer:%s JWTAudience:%s JWTPrivateKey:%s AccessTokenTTL:%s RefreshTokenTTL:%s Argon2:%d/%d/%d IDGenNodeID:%d LoginPolicy:%d/%s Sessions:%s/%s}",
 		c.AppEnv, c.HTTPPort, c.ReadHeaderTimeout, c.ShutdownTimeout,
 		dsn, c.PGMaxConns, c.RedisAddr, pass, c.RedisDB,
 		c.JWTIssuer, c.JWTAudience, key, c.AccessTokenTTL, c.RefreshTokenTTL,
 		c.Argon2Memory, c.Argon2Time, c.Argon2Threads, c.IDGenNodeID,
 		c.LoginMaxFailures, c.LoginLockoutDuration,
+		c.SessionIdleTimeout, c.SessionRetention,
 	)
 }
 

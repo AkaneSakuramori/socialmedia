@@ -29,6 +29,30 @@ type Service interface {
 	// REFR-4). Presenting a rotated-out token revokes all sessions and
 	// returns ErrRefreshTokenReuse (REFR-5).
 	Refresh(ctx context.Context, cmd RefreshCommand) (*RefreshResult, error)
+	// ListSessions returns the user's active devices for the device-management
+	// screen (API.md §4.7, SECURITY_SPEC.md SESS-8/DEVM-2).
+	ListSessions(ctx context.Context, cmd ListSessionsCommand) ([]SessionInfo, error)
+	// RenameSession re-labels one of the user's active devices.
+	RenameSession(ctx context.Context, cmd RenameSessionCommand) error
+	// Logout revokes the caller's current session (API.md §4.5). The session
+	// identity comes from the token, never from a body field (SESS-3).
+	Logout(ctx context.Context, cmd LogoutCommand) error
+	// LogoutSession revokes a specific device session (API.md §4.8); ownership
+	// is enforced (403 not owner / 404 not found).
+	LogoutSession(ctx context.Context, cmd LogoutSessionCommand) error
+	// LogoutOtherSessions revokes every active session except the caller's
+	// current one ("log out other devices").
+	LogoutOtherSessions(ctx context.Context, cmd LogoutOtherSessionsCommand) error
+	// LogoutAll revokes every session of the user and bumps the global token
+	// version so all outstanding access tokens fail at the gateways
+	// (API.md §4.6, SECURITY_SPEC.md SESS-6).
+	LogoutAll(ctx context.Context, cmd LogoutAllCommand) error
+	// ExpireIdleSessions runs the sliding idle/refresh-window expiry sweep
+	// (SESS-9, REFR-6). It returns the number of sessions expired.
+	ExpireIdleSessions(ctx context.Context) (int64, error)
+	// PurgeRevokedSessions runs the retention purge for revoked/expired
+	// sessions (DATABASE.md §4.4). It returns the number of rows deleted.
+	PurgeRevokedSessions(ctx context.Context) (int64, error)
 }
 
 // LoginCommand is the validated input for authentication (API.md §4.3).
@@ -91,6 +115,59 @@ type RegisterResult struct {
 	TokenPair domain.TokenPair
 }
 
+// SessionInfo is the device-management view of one session (API.md §4.7): the
+// public surface, never the refresh-token hashes or push tokens.
+type SessionInfo struct {
+	ID           int64
+	DeviceID     string
+	DeviceName   *string
+	Platform     *string
+	AppVersion   *string
+	LastActiveAt time.Time
+	CreatedAt    time.Time
+	// Current marks the session that made the request.
+	Current bool
+}
+
+// ListSessionsCommand identifies the caller and its own session.
+type ListSessionsCommand struct {
+	UserID          int64
+	CurrentSessionID int64
+}
+
+// RenameSessionCommand re-labels an active device (DATABASE.md §4.4
+// device_name).
+type RenameSessionCommand struct {
+	UserID     int64
+	SessionID  int64
+	DeviceName string
+}
+
+// LogoutCommand revokes the caller's current session. UserID and SessionID
+// both come from the access token (API.md §4.5, SESS-3).
+type LogoutCommand struct {
+	UserID    int64
+	SessionID int64
+}
+
+// LogoutSessionCommand revokes a specific device session (API.md §4.8).
+// SessionID is the target; ownership is enforced against UserID.
+type LogoutSessionCommand struct {
+	UserID    int64
+	SessionID int64
+}
+
+// LogoutOtherSessionsCommand revokes every device except the caller's.
+type LogoutOtherSessionsCommand struct {
+	UserID    int64
+	SessionID int64
+}
+
+// LogoutAllCommand revokes every device and bumps the global token version.
+type LogoutAllCommand struct {
+	UserID int64
+}
+
 // Deps is the constructor-injected dependency set for the auth service.
 type Deps struct {
 	Users       userdomain.UserRepository
@@ -105,6 +182,12 @@ type Deps struct {
 	IDs         domain.IDGenerator
 	TxBeginner  tx.Beginner
 	Clock       clock.Clock
+	// SessionIdleTimeout is the sliding idle window after which a session
+	// expires (SESS-9); used by ExpireIdleSessions.
+	SessionIdleTimeout time.Duration
+	// SessionRetention is how long revoked/expired sessions are kept before
+	// purge (DATABASE.md §4.4); used by PurgeRevokedSessions.
+	SessionRetention time.Duration
 }
 
 type service struct {

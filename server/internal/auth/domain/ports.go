@@ -44,6 +44,33 @@ type SessionRepository interface {
 	// RevokeAllByUserID revokes every active session of the user
 	// (SECURITY_SPEC.md REFR-5: theft response).
 	RevokeAllByUserID(ctx context.Context, dbtx tx.Tx, userID int64) error
+
+	// ListByUser returns the user's active sessions (API.md §4.7 — the
+	// device-management screen), newest activity first.
+	ListByUser(ctx context.Context, userID int64) ([]Session, error)
+	// FindByID returns the session with the given id, or ErrSessionNotFound.
+	// Implementations lock the row (SELECT ... FOR UPDATE) so admin operations
+	// that read-then-write serialize at the database.
+	FindByID(ctx context.Context, dbtx tx.Tx, sessionID int64) (*Session, error)
+	// RevokeByID atomically revokes one session of the user. It returns
+	// ErrSessionNotFound when the session is not (anymore) active under that
+	// user — ownership is enforced by the WHERE clause (SESS-3).
+	RevokeByID(ctx context.Context, dbtx tx.Tx, userID, sessionID int64) error
+	// RevokeOthersByUserID revokes every active session of the user except the
+	// caller's current one ("log out other devices").
+	RevokeOthersByUserID(ctx context.Context, dbtx tx.Tx, userID, keepSessionID int64) error
+	// Rename updates the user-visible device label of an active session of the
+	// user. It returns ErrSessionNotFound when the session is not active or not
+	// owned by the user.
+	Rename(ctx context.Context, dbtx tx.Tx, userID, sessionID int64, name string) error
+	// ExpireIdle transitions active sessions to 'expired' when they are idle
+	// beyond idleTimeout (SESS-9 sliding idle) or their refresh window has
+	// passed (REFR-6). It returns the number of sessions expired.
+	ExpireIdle(ctx context.Context, now time.Time, idleTimeout time.Duration) (int64, error)
+	// Purge deletes revoked/expired rows last changed before the cutoff
+	// (DATABASE.md §4.4 retention: 90 days). It returns the number of rows
+	// deleted.
+	Purge(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
 // LoginMethod is a supported credential method for login (API.md §4.3).
@@ -124,8 +151,11 @@ type TokenPair struct {
 // TokenIssuer issues short-lived JWT access tokens and opaque refresh tokens.
 type TokenIssuer interface {
 	// IssuePair mints an access token bound to the session/device and a fresh
-	// opaque refresh token for the given session.
-	IssuePair(ctx context.Context, sessionID, userID int64, deviceID string, now time.Time) (TokenPair, error)
+	// opaque refresh token for the given session. tokenVersion is the user's
+	// global token version (users.token_version); it is embedded in the access
+	// token so gateways can reject tokens issued before a sign-out-everywhere
+	// (SECURITY_SPEC.md SESS-6, JWT-5).
+	IssuePair(ctx context.Context, sessionID, userID int64, deviceID string, tokenVersion int64, now time.Time) (TokenPair, error)
 }
 
 // OTPVerifier verifies a one-time passcode for an identifier (OTP-1: 6 digits,

@@ -74,7 +74,7 @@ func (s *service) Refresh(ctx context.Context, cmd RefreshCommand) (*RefreshResu
 		return nil, domain.ErrAccountSuspended
 	}
 
-	pair, err := s.deps.Tokens.IssuePair(ctx, session.ID, session.UserID, session.Device.DeviceID, now)
+	pair, err := s.deps.Tokens.IssuePair(ctx, session.ID, session.UserID, session.Device.DeviceID, user.TokenVersion, now)
 	if err != nil {
 		return nil, fmt.Errorf("auth: issue tokens: %w", err)
 	}

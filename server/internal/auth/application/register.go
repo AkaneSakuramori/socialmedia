@@ -82,7 +82,7 @@ func (s *service) Register(ctx context.Context, cmd RegisterCommand) (*RegisterR
 		}
 	}
 
-	session, pair, err := s.createSession(ctx, dbtx, user.ID, cmd.Device, cmd.IPAddress, cmd.UserAgent, now)
+	session, pair, err := s.createSession(ctx, dbtx, user.ID, cmd.Device, cmd.IPAddress, cmd.UserAgent, now, user.TokenVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -148,12 +148,12 @@ func (s *service) createPasswordCredential(ctx context.Context, dbtx tx.Tx, user
 	return nil
 }
 
-func (s *service) createSession(ctx context.Context, dbtx tx.Tx, userID int64, device domain.DeviceInfo, ip, userAgent *string, now time.Time) (*domain.Session, domain.TokenPair, error) {
+func (s *service) createSession(ctx context.Context, dbtx tx.Tx, userID int64, device domain.DeviceInfo, ip, userAgent *string, now time.Time, tokenVersion int64) (*domain.Session, domain.TokenPair, error) {
 	sessionID, err := s.deps.IDs.NextID()
 	if err != nil {
 		return nil, domain.TokenPair{}, fmt.Errorf("auth: session id: %w", err)
 	}
-	pair, err := s.deps.Tokens.IssuePair(ctx, sessionID, userID, device.DeviceID, now)
+	pair, err := s.deps.Tokens.IssuePair(ctx, sessionID, userID, device.DeviceID, tokenVersion, now)
 	if err != nil {
 		return nil, domain.TokenPair{}, fmt.Errorf("auth: issue tokens: %w", err)
 	}

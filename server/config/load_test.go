@@ -55,6 +55,8 @@ func TestLoadReadsEnvironment(t *testing.T) {
 		"APP_JWT_PRIVATE_KEY":   "c2VjcmV0c2VlZA==",
 		"APP_ACCESS_TOKEN_TTL":  "5m",
 		"APP_REFRESH_TOKEN_TTL": "480h",
+		"APP_SESSION_IDLE_TIMEOUT": "240h",
+		"APP_SESSION_RETENTION":    "720h",
 		"APP_ARGON2_MEMORY_KIB": "32768",
 		"APP_ARGON2_TIME":       "2",
 		"APP_ARGON2_THREADS":    "2",
@@ -199,6 +201,8 @@ func TestValidateAuthFieldsAcceptDefaults(t *testing.T) {
 		Argon2Threads:        4,
 		LoginMaxFailures:     5,
 		LoginLockoutDuration: 5 * time.Minute,
+		SessionIdleTimeout:   30 * 24 * time.Hour,
+		SessionRetention:     90 * 24 * time.Hour,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() with default auth fields error = %v", err)

@@ -5,9 +5,11 @@ The InChat backend is a **modular monolith** (Go 1.24) following the finalized
 `ARCHITECTURE.md` and `API.md` the contract, `ENGINEERING_RULES.md` the house law.
 
 > **Status:** Sprint 1 — registration, login (password + OTP, AUTH-5 lockout),
-> and refresh-token rotation with reuse detection (REFR-4/5, API.md §4.4)
-> landed. Sessions, tokens, and the lockout store are in; device management
-> and delivery wiring are next.
+> refresh-token rotation with reuse detection (REFR-4/5, API.md §4.4), and
+> device/session management with logout (API.md §4.5–§4.8, SESS-3/SESS-6)
+> landed. Sessions, tokens, and the lockout store are in; the session
+> administration (list/rename/revoke/logout) use-cases are implemented; delivery
+> wiring is next.
 
 ## Stack
 
@@ -29,9 +31,9 @@ server/
 ├── internal/
 │   ├── app/               # composition root: DI, lifecycle, graceful shutdown
 │   ├── auth/              # registration, login, credentials, sessions, tokens
-│   │   ├── application/   #   Register/Login use-cases + ports wiring
+│   │   ├── application/   #   Register/Login/Refresh + device/session use-cases
 │   │   ├── domain/        #   identifier, password, credential, session, ports
-│   │   └── infra/         #   Argon2id, Ed25519 JWT, Redis login throttle
+│   │   └── infra/         #   Argon2id, Ed25519 JWT, Redis login throttle, PG repo
 │   ├── user/              # user aggregate + account-state machine
 │   └── platform/          # leaf infrastructure, depends on nothing
 │       ├── apierr/        # RFC 9457 error contract (API.md §2.5, Appendix A)
@@ -76,6 +78,8 @@ validated, and never passed through call stacks — consumers get concrete value
 | `APP_ARGON2_THREADS` | `4` | Argon2id parallelism |
 | `APP_LOGIN_MAX_FAILURES` | `5` | Failed logins before lockout (AUTH-5) |
 | `APP_LOGIN_LOCKOUT_DURATION` | `5m` | Lockout window (AUTH-5) |
+| `APP_SESSION_IDLE_TIMEOUT` | `720h` | Sliding session-idle expiry, must be ≤ `APP_REFRESH_TTL` (SESS-9) |
+| `APP_SESSION_RETENTION` | `2160h` | Revoked/expired session rows kept before purge (DATABASE.md §4.4) |
 | `APP_IDGEN_NODE_ID` | `0` | Snowflake node id (0–1023) |
 
 Copy `server/.env.example` → `server/.env.local` for local overrides; `dev.sh`
@@ -88,16 +92,20 @@ sources it. `config.String()` redacts passwords for safe logging.
 | `GET /healthz` | Liveness — process alive (independent of dependencies) |
 | `GET /readyz` | Readiness — PostgreSQL + Redis reachable; 503 while failing |
 
-Sprint 1 shipped the registration, login, and refresh **use-cases and domain
-layer** (ports, Argon2id password hashing, Ed25519 JWT + opaque refresh-token
-factory, per-identifier login lockout over Redis, single-use refresh rotation
-with reuse detection and atomic CAS, session/credential repositories,
-`users`/`user_credentials`/`user_sessions` schema). The HTTP endpoints
-(`POST /v1/auth/register`, `POST /v1/auth/login`, `POST /v1/auth/refresh`, …)
-arrive in the delivery milestone of Sprint 1 — until then the contract is
-exercised through `internal/auth/application` tests and build-tagged
-integration tests (`go test -tags integration ./internal/auth/infra/postgres/`,
-which need the dev PostgreSQL from `make dev-up`).
+Sprint 1 shipped the registration, login, refresh, and device/session
+management **use-cases and domain layer** (ports, Argon2id password hashing,
+Ed25519 JWT + opaque refresh-token factory, per-identifier login lockout over
+Redis, single-use refresh rotation with reuse detection and atomic CAS,
+session/credential repositories, session listing/rename/revoke/logout with
+idle-expiry and retention purge, `users`/`user_credentials`/`user_sessions`
+schema). The HTTP endpoints
+(`POST /v1/auth/register`, `POST /v1/auth/login`, `POST /v1/auth/refresh`,
+`POST /v1/auth/logout`, `GET /v1/auth/devices`,
+`DELETE /v1/auth/devices/:id`, …) arrive in the delivery milestone of Sprint 1
+— until then the contract is exercised through `internal/auth/application`
+tests and build-tagged integration tests
+(`go test -tags integration ./internal/auth/infra/postgres/`, which need the
+dev PostgreSQL from `make dev-up`).
 
 Everything else returns the RFC 9457 `application/problem+json` 404 envelope
 (`code`, `title`, `status`, `detail`, `instance`, `request_id`, `retryable`).

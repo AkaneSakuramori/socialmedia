@@ -6,6 +6,54 @@ versioning follows [SemVer](https://semver.org/). Newest entries appear first.
 
 ## [Unreleased]
 
+### Sprint 1 — Authentication & Identity (milestone 4: device management, session administration & logout)
+
+#### Added
+- **`server/migrations/000004_sessions`** — `users.token_version` (global
+  token version backing SESS-6 logout-all) and `user_sessions_state_updated_idx`
+  on `(state, updated_at)` for the retention sweep; matching `down.sql`.
+- **`server/internal/auth/application/sessions.go`** — device & session
+  management use-cases (API.md §4.5–§4.8, SECURITY_SPEC SESS-3/SESS-6/SESS-9):
+  `ListSessions` (own devices, newest-first, `current` flag), `RenameSession`
+  (device name 1–64 chars, only own active sessions → `ErrSessionNotOwned`),
+  `Logout` (current session revoked from token identity), `LogoutSession`
+  (selected device, 404/403 semantics), `LogoutOtherSessions`,
+  `LogoutAll` (bumps `users.token_version` and revokes every session in one
+  transaction so all previously issued access tokens fail the `ver` check at
+  gateways, JWT-5), `ExpireIdleSessions` (SESS-9 sliding idle timeout) and
+  `PurgeRevokedSessions` (DATABASE.md §4.4 90-day retention). Audit events
+  `auth.session_renamed` / `auth.logout` / `auth.session_revoked` /
+  `auth.logout_others` / `auth.logout_all` / `auth.sessions_expired` /
+  `auth.sessions_purged`.
+- **`server/internal/auth/domain`** — `ErrSessionNotOwned`; `ValidateDeviceName`
+  (1–64 chars); `SessionRepository` ports `ListByUser`, `FindByID` (FOR
+  UPDATE), `RevokeByID` (ownership scoped in the WHERE clause, SESS-3),
+  `RevokeOthersByUserID`, `Rename`, `ExpireIdle`, `Purge`; `TokenIssuer`
+  `IssuePair` now embeds the caller's `token_version` as the `ver` access-token
+  claim; `users.token_version` + `UserRepository.BumpTokenVersion`.
+- **`server/config`** — `APP_SESSION_IDLE_TIMEOUT` (default 30d, validated ≤
+  refresh TTL) and `APP_SESSION_RETENTION` (default 90d).
+- **Tests** — ~16 application unit tests (list/order/current flag, rename
+  validation + ownership + revoked, logout current/selected/foreign/others/all
+  incl. tx-atomic token-version bump and rollback, idle expiry window, retention
+  purge) and 5 new build-tagged integration tests against live PostgreSQL
+  (list+rename, ownership-scoped revoke, keep-current on logout-others,
+  idle-expire + retention purge, SESS-6 token-version bump atomicity).
+
+#### Changed
+- `IssuePair` gained a `tokenVersion` parameter (`ver` claim, JWT-5); register,
+  login and refresh stamp the version read at issue time.
+- `Service` interface exposes `ListSessions`, `RenameSession`, `Logout`,
+  `LogoutSession`, `LogoutOtherSessions`, `LogoutAll`, `ExpireIdleSessions`,
+  `PurgeRevokedSessions`; `Deps` gained `SessionIdleTimeout`/`SessionRetention`.
+- Integration tests seed users and sessions with ids in disposable ranges and
+  wipe leftovers at process start (a killed run can never break a rerun).
+
+#### Verified
+- Migration `000004_sessions` applied; `token_version` and the state/updated
+  index verified in PostgreSQL. `make ci` green including the 9 integration
+  tests against the dev stack.
+
 ### Sprint 1 — Authentication & Identity (milestone 3: refresh & reuse detection)
 
 #### Added
