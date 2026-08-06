@@ -4,7 +4,7 @@
 
 InChat is a social media and messaging platform designed and engineered for India first — from the ground up. It pairs a modern, offline-first Flutter app with a high-performance Go backend, built to deliver fast, reliable messaging on the real-world devices and networks that India runs on.
 
-> **Status:** Design finalized · Go backend foundation (Sprint 0) shipped · Auth & Identity (Sprint 1) in progress.
+> **Status:** Design finalized · Go backend foundation (Sprint 0) shipped · Sprint 1 in progress (registration, login + lockout, refresh rotation with reuse detection landed).
 >
 > This repository is the **public home of InChat's engineering documentation** — the source of truth for the product: architecture, database, API, backend and Flutter engineering guides, DevOps, quality/release, and security standards. It intentionally contains **documentation only**; production code lives in the **[InChat code repository](https://github.com/AkaneSakuramori/inchat)**.
 
@@ -99,7 +99,7 @@ See `SECURITY.md` and `SECURITY_SPEC.md` for the full standard.
 
 - [x] **Phase 0 — Design:** architecture, database, API, and engineering documentation finalized
 - [x] **Sprint 0 — Backend Foundation:** modular Go monolith skeleton — config, DI, logging, RFC 9457 errors, health probes, PostgreSQL/Redis, Docker/Compose, CI/CD
-- [ ] **Sprint 1 — Auth & Identity:** registration, login, sessions, refresh-token rotation, device management, OTP, account recovery
+- [ ] **Sprint 1 — Auth & Identity:** registration, login (password/OTP, AUTH-5 lockout), and refresh-token rotation with reuse detection shipped in `internal/auth`; device management, self-service OTP, and account recovery remain, then HTTP delivery (`/v1/auth/*`)
 - [ ] **Phase 1 — India launch:** application code (backend + Flutter app), infrastructure, canary releases, staged app rollout
 - [ ] **Phase 2 — Scale:** India-scale growth, passkeys as default, key transparency, E2EE pilot
 - [ ] **Phase 3 — Global:** multi-region, GDPR posture, end-to-end encryption mode
