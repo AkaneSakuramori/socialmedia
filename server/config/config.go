@@ -36,6 +36,29 @@ type Config struct {
 	RedisPassword string
 	// RedisDB is the selected Redis logical database.
 	RedisDB int
+
+	// JWTIssuer is the issuer claim of issued access tokens.
+	JWTIssuer string
+	// JWTAudience is the audience claim of issued access tokens.
+	JWTAudience string
+	// JWTPrivateKey is the base64-encoded Ed25519 seed used to sign access
+	// tokens. Empty in dev means "generate an ephemeral key at startup";
+	// required (non-empty) in staging/prod.
+	JWTPrivateKey string
+	// AccessTokenTTL is how long an access token remains valid before refresh.
+	AccessTokenTTL time.Duration
+	// RefreshTokenTTL is the sliding lifetime of a session's refresh token
+	// (SECURITY_SPEC.md REFR-6: 30–90 days).
+	RefreshTokenTTL time.Duration
+
+	// Argon2Memory, Argon2Time, Argon2Threads configure the Argon2id password
+	// KDF (SECURITY_SPEC.md PASS-1). Memory is in KiB.
+	Argon2Memory  int
+	Argon2Time    int
+	Argon2Threads int
+	// IDGenNodeID is this instance's idgen node id (0–1023); each instance in a
+	// deployment must use a distinct value.
+	IDGenNodeID int
 }
 
 // Defaults for local development. Deployed environments override via env vars.
@@ -50,6 +73,14 @@ const (
 	// localPGDSN matches infra/docker/docker-compose.yml. Only used when
 	// APP_ENV=dev and APP_PG_DSN is unset.
 	localPGDSN = "postgres://app:app_password@localhost:5432/inchat?sslmode=disable"
+
+	defaultJWTIssuer       = "https://api.socialmedia.example"
+	defaultJWTAudience     = "inchat-api"
+	defaultAccessTokenTTL  = 15 * time.Minute
+	defaultRefreshTokenTTL = 30 * 24 * time.Hour
+	defaultArgon2Memory    = 64 * 1024 // 64 MiB (OWASP-recommended floor)
+	defaultArgon2Time      = 3
+	defaultArgon2Threads   = 4
 )
 
 // Load reads configuration from the environment, applies defaults, and
@@ -66,6 +97,15 @@ func Load() (Config, error) {
 		RedisAddr:         getEnv("APP_REDIS_ADDR", defaultRedisAddr),
 		RedisPassword:     os.Getenv("APP_REDIS_PASSWORD"),
 		RedisDB:           getInt("APP_REDIS_DB", defaultRedisDB),
+		JWTIssuer:         getEnv("APP_JWT_ISSUER", defaultJWTIssuer),
+		JWTAudience:       getEnv("APP_JWT_AUDIENCE", defaultJWTAudience),
+		JWTPrivateKey:     os.Getenv("APP_JWT_PRIVATE_KEY"),
+		AccessTokenTTL:    getDuration("APP_ACCESS_TOKEN_TTL", defaultAccessTokenTTL),
+		RefreshTokenTTL:   getDuration("APP_REFRESH_TOKEN_TTL", defaultRefreshTokenTTL),
+		Argon2Memory:      getInt("APP_ARGON2_MEMORY_KIB", defaultArgon2Memory),
+		Argon2Time:        getInt("APP_ARGON2_TIME", defaultArgon2Time),
+		Argon2Threads:     getInt("APP_ARGON2_THREADS", defaultArgon2Threads),
+		IDGenNodeID:       getInt("APP_IDGEN_NODE_ID", 0),
 	}
 
 	// Local dev convenience: a default DSN matching the compose stack.
@@ -75,6 +115,11 @@ func Load() (Config, error) {
 		} else {
 			return Config{}, fmt.Errorf("APP_PG_DSN is required when APP_ENV=%q", cfg.AppEnv)
 		}
+	}
+
+	// Signing keys must never be silently generated in a real environment.
+	if cfg.AppEnv != "dev" && cfg.JWTPrivateKey == "" {
+		return Config{}, fmt.Errorf("APP_JWT_PRIVATE_KEY is required when APP_ENV=%q", cfg.AppEnv)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -113,6 +158,34 @@ func (c Config) Validate() error {
 		errs = append(errs, "APP_REDIS_ADDR must not be empty")
 	}
 
+	if c.JWTIssuer == "" {
+		errs = append(errs, "APP_JWT_ISSUER must not be empty")
+	}
+	if c.JWTAudience == "" {
+		errs = append(errs, "APP_JWT_AUDIENCE must not be empty")
+	}
+	if c.AccessTokenTTL <= 0 {
+		errs = append(errs, "APP_ACCESS_TOKEN_TTL must be > 0")
+	}
+	if c.RefreshTokenTTL <= 0 {
+		errs = append(errs, "APP_REFRESH_TOKEN_TTL must be > 0")
+	}
+	if c.AccessTokenTTL >= c.RefreshTokenTTL {
+		errs = append(errs, "APP_ACCESS_TOKEN_TTL must be shorter than APP_REFRESH_TOKEN_TTL")
+	}
+	if c.Argon2Memory < 8*c.Argon2Threads {
+		errs = append(errs, "APP_ARGON2_MEMORY_KIB must be >= 8 * APP_ARGON2_THREADS (Argon2 minimum)")
+	}
+	if c.Argon2Time < 1 {
+		errs = append(errs, "APP_ARGON2_TIME must be >= 1")
+	}
+	if c.Argon2Threads < 1 || c.Argon2Threads > 255 {
+		errs = append(errs, "APP_ARGON2_THREADS must be in [1, 255]")
+	}
+	if c.IDGenNodeID < 0 || c.IDGenNodeID > 1023 {
+		errs = append(errs, "APP_IDGEN_NODE_ID must be in [0, 1023]")
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(errs, "\n  - "))
 	}
@@ -133,10 +206,16 @@ func (c Config) String() string {
 	if pass != "" {
 		pass = "xxxxx"
 	}
+	key := c.JWTPrivateKey
+	if key != "" {
+		key = "xxxxx"
+	}
 	return fmt.Sprintf(
-		"{AppEnv:%s HTTPPort:%s ReadHeaderTimeout:%s ShutdownTimeout:%s PGDSN:%s PGMaxConns:%d RedisAddr:%s RedisPassword:%s RedisDB:%d}",
+		"{AppEnv:%s HTTPPort:%s ReadHeaderTimeout:%s ShutdownTimeout:%s PGDSN:%s PGMaxConns:%d RedisAddr:%s RedisPassword:%s RedisDB:%d JWTIssuer:%s JWTAudience:%s JWTPrivateKey:%s AccessTokenTTL:%s RefreshTokenTTL:%s Argon2:%d/%d/%d IDGenNodeID:%d}",
 		c.AppEnv, c.HTTPPort, c.ReadHeaderTimeout, c.ShutdownTimeout,
 		dsn, c.PGMaxConns, c.RedisAddr, pass, c.RedisDB,
+		c.JWTIssuer, c.JWTAudience, key, c.AccessTokenTTL, c.RefreshTokenTTL,
+		c.Argon2Memory, c.Argon2Time, c.Argon2Threads, c.IDGenNodeID,
 	)
 }
 

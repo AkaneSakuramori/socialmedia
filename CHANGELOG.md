@@ -61,3 +61,53 @@ versioning follows [SemVer](https://semver.org/).
 - Readiness endpoint returns `"status": "ready"` when all checks pass
   (matches DEVOPS.md §5 semantics and the smoke contract).
 - `docker compose migrate` correctly activates the `tools` profile.
+
+### Sprint 1 — Authentication & Identity (milestone 1: registration)
+
+#### Added
+- **`server/pkg/tx`** — transaction boundary abstraction (`Tx`, `Beginner`)
+  so use-cases stay DB-agnostic.
+- **`server/pkg/clock`** — injectable `Clock` for deterministic time in tests.
+- **`server/internal/platform/idgen`** — snowflake id generator
+  (41-bit ms | 10-bit node | 12-bit sequence, epoch 2020-01-01), monotonicity,
+  uniqueness-under-concurrency, clock-skew and overflow tests.
+- **`server/migrations/000002_auth`** — `users`, `user_credentials`,
+  `user_sessions` tables (snowflake `bigint` PKs, CHECK-enummed state columns,
+  `set_updated_at()` trigger, trimmed GIN index, partial unique username on
+  non-deleted rows) plus the reverse-order `down.sql`.
+- **`server/internal/user/domain`** — user aggregate with account-state
+  machine, `Username`/`DisplayName` value objects (length, charset, reserved
+  list), `UserRepository` ports (`Create`/`FindBy*`/`*Taken`), domain errors.
+- **`server/internal/auth/domain`** — normalized `Identifier` (E.164 phone /
+  email), password rules (`SECURITY_SPEC.md` PASS-2), PHC `PasswordHash`,
+  SHA-256 opaque-token hashing (REFR-2), `Credential`, `Session`/`DeviceInfo`
+  (state machine, platforms), and the auth port set (`CredentialRepository`,
+  `SessionRepository`, `PasswordHasher`, `TokenIssuer`, `OTPVerifier`,
+  `IDGenerator`).
+- **`server/internal/auth/infra/security/argon2id.go`** — Argon2id with
+  unique random salt, PHC strings, parameter drift tolerance and constant-time
+  comparison (PASS-1).
+- **`server/internal/auth/infra/security/token.go`** — Ed25519 JWT access
+  tokens (claims `sid`, `dev`, `scopes`, `sub`, `iss`, `aud`, `exp`, `jti`) and
+  256-bit opaque refresh tokens (ARCHITECTURE.md §10.2), with verification
+  pinned to method/issuer/audience/expiry.
+- **`server/internal/auth/application`** — `Service` + `Register` use-case:
+  OTP verification, uniqueness checks, then user/credential/session + token
+  pair in one transaction (DATABASE.md §10). `service.go` carries the port
+  wiring (`Deps`) for the remaining Sprint 1 use-cases.
+- **`server/config`** — JWT issuer/audience/key, access/refresh TTLs, Argon2id
+  params, and snowflake node id configuration with cross-field validation
+  (`access_ttl < refresh_ttl`, Argon2id memory/threads floor, node range,
+  staging/prod require a signing key).
+- **`server/.env.example`** — the new auth configuration variables.
+- **Docs** — `server/README.md` (layout, config table, Sprint 1 status) and
+  `CHANGELOG.md` (this section).
+
+#### Changed
+- `server/go.mod` — added `golang.org/x/crypto` (Argon2id) and
+  `github.com/golang-jwt/jwt/v5` (JWT), with transitive deps bumped to
+  Go 1.24-compatible versions.
+
+#### Applied
+- Migration `000002_auth` applied to the dev stack; verified tables,
+  constraints, indexes and the `set_updated_at` trigger in PostgreSQL.

@@ -4,8 +4,8 @@ The InChat backend is a **modular monolith** (Go 1.24) following the finalized
 `architecture/` documents — `ENGINEERING.md` is the backend source of truth,
 `ARCHITECTURE.md` and `API.md` the contract, `ENGINEERING_RULES.md` the house law.
 
-> **Status:** Sprint 0 — foundation only. No authentication, no messaging.
-> Everything here is infrastructure every future feature builds on.
+> **Status:** Sprint 1 — account registration (OTP + optional password),
+> sessions, and token issuance landed. Messaging is still to come.
 
 ## Stack
 
@@ -26,6 +26,11 @@ server/
 ├── config/                # typed, validated, env-only config (never imported by business code)
 ├── internal/
 │   ├── app/               # composition root: DI, lifecycle, graceful shutdown
+│   ├── auth/              # registration, credentials, sessions, tokens
+│   │   ├── application/   #   Register use-case + ports wiring (service.go)
+│   │   ├── domain/        #   identifier, password, credential, session, ports
+│   │   └── infra/         #   Argon2id + Ed25519 JWT / opaque refresh tokens
+│   ├── user/              # user aggregate + account-state machine
 │   └── platform/          # leaf infrastructure, depends on nothing
 │       ├── apierr/        # RFC 9457 error contract (API.md §2.5, Appendix A)
 │       ├── observability/ # slog setup + request-id/access-log middleware
@@ -59,6 +64,15 @@ validated, and never passed through call stacks — consumers get concrete value
 | `APP_REDIS_ADDR` | `localhost:6379` | Redis address |
 | `APP_REDIS_PASSWORD` | — | Redis password (empty when unset) |
 | `APP_REDIS_DB` | `0` | Redis logical DB |
+| `APP_JWT_ISSUER` | `inchat` | JWT `iss` claim |
+| `APP_JWT_AUDIENCE` | `inchat-api` | JWT `aud` claim |
+| `APP_JWT_PRIVATE_KEY` | (dev default) | Ed25519 PEM signing key (required in staging/prod) |
+| `APP_ACCESS_TTL` | `15m` | Access-token lifetime (seconds) |
+| `APP_REFRESH_TTL` | `720h` | Refresh-token lifetime, 30–90 days (seconds) |
+| `APP_ARGON2_MEMORY` | `64` | Argon2id memory in KiB |
+| `APP_ARGON2_TIME` | `3` | Argon2id iterations |
+| `APP_ARGON2_THREADS` | `2` | Argon2id parallelism |
+| `APP_IDGEN_NODE` | `0` | Snowflake node id (0–1023) |
 
 Copy `server/.env.example` → `server/.env.local` for local overrides; `dev.sh`
 sources it. `config.String()` redacts passwords for safe logging.
@@ -69,6 +83,13 @@ sources it. `config.String()` redacts passwords for safe logging.
 |---|---|
 | `GET /healthz` | Liveness — process alive (independent of dependencies) |
 | `GET /readyz` | Readiness — PostgreSQL + Redis reachable; 503 while failing |
+
+Sprint 1 shipped the registration **use-case and domain layer** (ports, Argon2id
+password hashing, Ed25519 JWT + opaque refresh-token factory, session/credential
+repositories, `users`/`user_credentials`/`user_sessions` schema). The HTTP
+endpoints (`POST /v1/auth/register`, …) arrive in the delivery milestone of
+Sprint 1 — until then the contract is exercised through
+`internal/auth/application` tests.
 
 Everything else returns the RFC 9457 `application/problem+json` 404 envelope
 (`code`, `title`, `status`, `detail`, `instance`, `request_id`, `retryable`).
