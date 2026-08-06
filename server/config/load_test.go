@@ -151,6 +151,20 @@ func TestValidateAuthFields(t *testing.T) {
 			},
 			expect: "APP_IDGEN_NODE_ID",
 		},
+		{
+			name: "login max failures zero",
+			mutate: func(c *Config) {
+				c.LoginMaxFailures = 0
+			},
+			expect: "APP_LOGIN_MAX_FAILURES",
+		},
+		{
+			name: "login lockout zero",
+			mutate: func(c *Config) {
+				c.LoginLockoutDuration = 0
+			},
+			expect: "APP_LOGIN_LOCKOUT_DURATION",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -169,20 +183,22 @@ func TestValidateAuthFields(t *testing.T) {
 
 func TestValidateAuthFieldsAcceptDefaults(t *testing.T) {
 	cfg := Config{
-		AppEnv:            "dev",
-		HTTPPort:          "8080",
-		ReadHeaderTimeout: 5 * time.Second,
-		ShutdownTimeout:   15 * time.Second,
-		PGDSN:             localPGDSN,
-		PGMaxConns:        10,
-		RedisAddr:         "localhost:6379",
-		JWTIssuer:         "https://api.socialmedia.example",
-		JWTAudience:       "inchat-api",
-		AccessTokenTTL:    15 * time.Minute,
-		RefreshTokenTTL:   30 * 24 * time.Hour,
-		Argon2Memory:      64 * 1024,
-		Argon2Time:        3,
-		Argon2Threads:     4,
+		AppEnv:               "dev",
+		HTTPPort:             "8080",
+		ReadHeaderTimeout:    5 * time.Second,
+		ShutdownTimeout:      15 * time.Second,
+		PGDSN:                localPGDSN,
+		PGMaxConns:           10,
+		RedisAddr:            "localhost:6379",
+		JWTIssuer:            "https://api.socialmedia.example",
+		JWTAudience:          "inchat-api",
+		AccessTokenTTL:       15 * time.Minute,
+		RefreshTokenTTL:      30 * 24 * time.Hour,
+		Argon2Memory:         64 * 1024,
+		Argon2Time:           3,
+		Argon2Threads:        4,
+		LoginMaxFailures:     5,
+		LoginLockoutDuration: 5 * time.Minute,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() with default auth fields error = %v", err)

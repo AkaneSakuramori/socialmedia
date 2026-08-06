@@ -4,8 +4,9 @@ The InChat backend is a **modular monolith** (Go 1.24) following the finalized
 `architecture/` documents — `ENGINEERING.md` is the backend source of truth,
 `ARCHITECTURE.md` and `API.md` the contract, `ENGINEERING_RULES.md` the house law.
 
-> **Status:** Sprint 1 — account registration (OTP + optional password),
-> sessions, and token issuance landed. Messaging is still to come.
+> **Status:** Sprint 1 — account registration and login (password + OTP, with
+> AUTH-5 lockout) landed. Sessions, tokens, and the lockout store are in;
+> refresh rotation, device management, and delivery wiring are next.
 
 ## Stack
 
@@ -26,10 +27,10 @@ server/
 ├── config/                # typed, validated, env-only config (never imported by business code)
 ├── internal/
 │   ├── app/               # composition root: DI, lifecycle, graceful shutdown
-│   ├── auth/              # registration, credentials, sessions, tokens
-│   │   ├── application/   #   Register use-case + ports wiring (service.go)
+│   ├── auth/              # registration, login, credentials, sessions, tokens
+│   │   ├── application/   #   Register/Login use-cases + ports wiring
 │   │   ├── domain/        #   identifier, password, credential, session, ports
-│   │   └── infra/         #   Argon2id + Ed25519 JWT / opaque refresh tokens
+│   │   └── infra/         #   Argon2id, Ed25519 JWT, Redis login throttle
 │   ├── user/              # user aggregate + account-state machine
 │   └── platform/          # leaf infrastructure, depends on nothing
 │       ├── apierr/        # RFC 9457 error contract (API.md §2.5, Appendix A)
@@ -71,8 +72,10 @@ validated, and never passed through call stacks — consumers get concrete value
 | `APP_REFRESH_TTL` | `720h` | Refresh-token lifetime, 30–90 days (seconds) |
 | `APP_ARGON2_MEMORY` | `64` | Argon2id memory in KiB |
 | `APP_ARGON2_TIME` | `3` | Argon2id iterations |
-| `APP_ARGON2_THREADS` | `2` | Argon2id parallelism |
-| `APP_IDGEN_NODE` | `0` | Snowflake node id (0–1023) |
+| `APP_ARGON2_THREADS` | `4` | Argon2id parallelism |
+| `APP_LOGIN_MAX_FAILURES` | `5` | Failed logins before lockout (AUTH-5) |
+| `APP_LOGIN_LOCKOUT_DURATION` | `5m` | Lockout window (AUTH-5) |
+| `APP_IDGEN_NODE_ID` | `0` | Snowflake node id (0–1023) |
 
 Copy `server/.env.example` → `server/.env.local` for local overrides; `dev.sh`
 sources it. `config.String()` redacts passwords for safe logging.
@@ -84,11 +87,12 @@ sources it. `config.String()` redacts passwords for safe logging.
 | `GET /healthz` | Liveness — process alive (independent of dependencies) |
 | `GET /readyz` | Readiness — PostgreSQL + Redis reachable; 503 while failing |
 
-Sprint 1 shipped the registration **use-case and domain layer** (ports, Argon2id
-password hashing, Ed25519 JWT + opaque refresh-token factory, session/credential
-repositories, `users`/`user_credentials`/`user_sessions` schema). The HTTP
-endpoints (`POST /v1/auth/register`, …) arrive in the delivery milestone of
-Sprint 1 — until then the contract is exercised through
+Sprint 1 shipped the registration and login **use-cases and domain layer**
+(ports, Argon2id password hashing, Ed25519 JWT + opaque refresh-token factory,
+per-identifier login lockout over Redis, session/credential repositories,
+`users`/`user_credentials`/`user_sessions` schema). The HTTP endpoints
+(`POST /v1/auth/register`, `POST /v1/auth/login`, …) arrive in the delivery
+milestone of Sprint 1 — until then the contract is exercised through
 `internal/auth/application` tests.
 
 Everything else returns the RFC 9457 `application/problem+json` 404 envelope

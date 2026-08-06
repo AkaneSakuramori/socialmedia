@@ -21,6 +21,31 @@ type Service interface {
 	// Register creates a new account, verifies the OTP, and returns the first
 	// session and token pair (API.md §4.1).
 	Register(ctx context.Context, cmd RegisterCommand) (*RegisterResult, error)
+	// Login authenticates an existing user (password or OTP) and returns the
+	// session bound to the device with a fresh token pair (API.md §4.3).
+	// Failed attempts are throttled per identifier (AUTH-5).
+	Login(ctx context.Context, cmd LoginCommand) (*LoginResult, error)
+}
+
+// LoginCommand is the validated input for authentication (API.md §4.3).
+// Password is used when Method == password; OTPCode when Method == otp.
+type LoginCommand struct {
+	IdentifierType domain.IdentifierType
+	Identifier     string
+	Method         domain.LoginMethod
+	Password       string
+	OTPCode        string
+	Device         domain.DeviceInfo
+	IPAddress      *string
+	UserAgent      *string
+}
+
+// LoginResult is the outcome of authentication: the account, its device
+// session, and the issued token pair (same shape as API.md §4.1/§4.3).
+type LoginResult struct {
+	User      userdomain.User
+	Session   domain.Session
+	TokenPair domain.TokenPair
 }
 
 // RegisterCommand is the validated input for account creation (API.md §4.1).
@@ -53,6 +78,9 @@ type Deps struct {
 	Hasher      domain.PasswordHasher
 	Tokens      domain.TokenIssuer
 	OTP         domain.OTPVerifier
+	Throttle    domain.LoginThrottle
+	Policy      domain.LoginPolicy
+	Audit       domain.AuditLogger
 	IDs         domain.IDGenerator
 	TxBeginner  tx.Beginner
 	Clock       clock.Clock

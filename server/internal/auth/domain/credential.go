@@ -33,6 +33,16 @@ type PasswordCredentialData struct {
 	Hash string `json:"hash"`
 }
 
+// PasswordHash returns the Argon2id PHC stored in this password credential's
+// data, or ErrInvalidCredentials when the payload is not a password shape.
+func (c *Credential) PasswordHash() (PasswordHash, error) {
+	var d PasswordCredentialData
+	if err := json.Unmarshal(c.Data, &d); err != nil || d.Hash == "" {
+		return PasswordHash{}, ErrInvalidCredentials
+	}
+	return NewPasswordHash(d.Hash), nil
+}
+
 // NewPasswordCredential builds a password-method credential for a user. It
 // returns an error only if the credential payload cannot be marshaled (never in
 // practice, since it is a fixed shape).

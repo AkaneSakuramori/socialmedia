@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -38,10 +39,25 @@ func (f *fakeTx) Rollback(context.Context) error {
 }
 
 type fakeBeginner struct {
-	tx *fakeTx
+	mu   sync.Mutex
+	last *fakeTx
 }
 
-func (b *fakeBeginner) Begin(context.Context) (tx.Tx, error) { return b.tx, nil }
+func (b *fakeBeginner) Begin(context.Context) (tx.Tx, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t := &fakeTx{}
+	b.last = t
+	return t, nil
+}
+
+// lastTx returns the most recent transaction begun by this beginner (a fresh
+// fakeTx per call, like a real database session).
+func (b *fakeBeginner) lastTx() *fakeTx {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.last
+}
 
 type fakeUserRepo struct {
 	byPhone    map[string]*userdomain.User
@@ -128,8 +144,9 @@ func (r *fakeCredRepo) FindPassword(_ context.Context, userID int64) (*domain.Cr
 }
 
 type fakeSessionRepo struct {
-	sessions []*domain.Session
-	mu       sync.Mutex
+	sessions  []*domain.Session
+	updateErr error
+	mu        sync.Mutex
 }
 
 func (r *fakeSessionRepo) Create(_ context.Context, _ tx.Tx, s *domain.Session) error {
@@ -137,6 +154,32 @@ func (r *fakeSessionRepo) Create(_ context.Context, _ tx.Tx, s *domain.Session) 
 	defer r.mu.Unlock()
 	r.sessions = append(r.sessions, s)
 	return nil
+}
+
+func (r *fakeSessionRepo) FindByDeviceID(_ context.Context, userID int64, deviceID string) (*domain.Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		if s.UserID == userID && s.Device.DeviceID == deviceID {
+			return s, nil
+		}
+	}
+	return nil, domain.ErrSessionNotFound
+}
+
+func (r *fakeSessionRepo) Update(_ context.Context, _ tx.Tx, s *domain.Session) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.updateErr != nil {
+		return r.updateErr
+	}
+	for i, old := range r.sessions {
+		if old.ID == s.ID {
+			r.sessions[i] = s
+			return nil
+		}
+	}
+	return domain.ErrSessionNotFound
 }
 
 type fakeHasher struct{}
@@ -149,17 +192,19 @@ func (fakeHasher) Verify(_ context.Context, h domain.PasswordHash, plaintext str
 }
 
 type fakeTokenIssuer struct {
-	err error
+	err   error
+	nonce int
 }
 
-func (f fakeTokenIssuer) IssuePair(_ context.Context, sessionID, userID int64, deviceID string, now time.Time) (domain.TokenPair, error) {
+func (f *fakeTokenIssuer) IssuePair(_ context.Context, sessionID, userID int64, deviceID string, now time.Time) (domain.TokenPair, error) {
 	if f.err != nil {
 		return domain.TokenPair{}, f.err
 	}
+	f.nonce++
 	return domain.TokenPair{
-		AccessToken:      "access." + string(rune('0'+sessionID)) + ".x",
-		RefreshToken:     "rt_" + string(rune('0'+sessionID)),
-		JTI:              "jt_fake",
+		AccessToken:      fmt.Sprintf("access.%d.%d", sessionID, f.nonce),
+		RefreshToken:     fmt.Sprintf("rt-%d-%d", f.nonce, sessionID),
+		JTI:              fmt.Sprintf("jti-%d", f.nonce),
 		AccessExpiresAt:  now.Add(15 * time.Minute),
 		RefreshExpiresAt: now.Add(30 * 24 * time.Hour),
 	}, nil
@@ -193,34 +238,94 @@ func (g *fakeIDGen) NextID() (int64, error) {
 	return g.next, nil
 }
 
+type fakeThrottle struct {
+	counts map[string]int
+	policy domain.LoginPolicy
+	mu     sync.Mutex
+	err    error
+}
+
+func (t *fakeThrottle) Failures(_ context.Context, identifier string) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.counts[identifier], t.err
+}
+
+func (t *fakeThrottle) RecordFailure(_ context.Context, identifier string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.counts[identifier]++
+	return t.err
+}
+
+func (t *fakeThrottle) Clear(_ context.Context, identifier string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.counts, identifier)
+	return t.err
+}
+
+func (t *fakeThrottle) LockoutRemaining(_ context.Context, identifier string) (time.Duration, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.counts[identifier] >= t.policy.MaxFailures {
+		return t.policy.LockoutDuration, t.err
+	}
+	return 0, t.err
+}
+
+type fakeAudit struct {
+	events []domain.AuditEvent
+	mu     sync.Mutex
+}
+
+func (a *fakeAudit) Log(_ context.Context, e domain.AuditEvent) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.events = append(a.events, e)
+	return nil
+}
+
+func (a *fakeAudit) actions() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []string
+	for _, e := range a.events {
+		out = append(out, e.Action)
+	}
+	return out
+}
+
 // ---- test harness ----
 
 type harness struct {
-	svc    Service
-	users  *fakeUserRepo
-	creds  *fakeCredRepo
-	sess   *fakeSessionRepo
-	otp    *fakeOTP
-	tx     *fakeTx
-	begin  *fakeBeginner
-	ids    *fakeIDGen
-	tokens *fakeTokenIssuer
-	clk    clock.Clock
+	svc      Service
+	users    *fakeUserRepo
+	creds    *fakeCredRepo
+	sess     *fakeSessionRepo
+	otp      *fakeOTP
+	begin    *fakeBeginner
+	ids      *fakeIDGen
+	tokens   *fakeTokenIssuer
+	throttle *fakeThrottle
+	audit    *fakeAudit
+	clk      clock.Clock
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{
-		users:  newFakeUserRepo(),
-		creds:  &fakeCredRepo{},
-		sess:   &fakeSessionRepo{},
-		otp:    &fakeOTP{valid: map[string]string{"+15550123": "482913", "+15550999": "999999", "aya@example.com": "123456"}},
-		tx:     &fakeTx{},
-		ids:    &fakeIDGen{next: 1000},
-		clk:    clock.System(),
-		tokens: &fakeTokenIssuer{},
+		users:    newFakeUserRepo(),
+		creds:    &fakeCredRepo{},
+		sess:     &fakeSessionRepo{},
+		otp:      &fakeOTP{valid: map[string]string{"+15550123": "482913", "+15550999": "999999", "aya@example.com": "123456"}},
+		ids:      &fakeIDGen{next: 1000},
+		clk:      clock.System(),
+		tokens:   &fakeTokenIssuer{},
+		throttle: &fakeThrottle{counts: map[string]int{}, policy: domain.DefaultLoginPolicy()},
+		audit:    &fakeAudit{},
 	}
-	h.begin = &fakeBeginner{tx: h.tx}
+	h.begin = &fakeBeginner{}
 	h.svc = New(Deps{
 		Users:       h.users,
 		Credentials: h.creds,
@@ -228,6 +333,9 @@ func newHarness(t *testing.T) *harness {
 		Hasher:      fakeHasher{},
 		Tokens:      h.tokens,
 		OTP:         h.otp,
+		Throttle:    h.throttle,
+		Policy:      domain.DefaultLoginPolicy(),
+		Audit:       h.audit,
 		IDs:         h.ids,
 		TxBeginner:  h.begin,
 		Clock:       h.clk,
@@ -295,10 +403,10 @@ func TestRegisterCreatesUserCredentialAndSession(t *testing.T) {
 		t.Error("token pair must be issued")
 	}
 
-	if !h.tx.committed {
+	if !h.begin.lastTx().committed {
 		t.Error("transaction was not committed")
 	}
-	if h.tx.rolledBack {
+	if h.begin.lastTx().rolledBack {
 		t.Error("transaction was rolled back after success")
 	}
 }
@@ -432,10 +540,10 @@ func TestRegisterRollsBackWhenUserCreateFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("Register expected user-create failure")
 	}
-	if !h.tx.rolledBack {
+	if !h.begin.lastTx().rolledBack {
 		t.Error("transaction must be rolled back when an inner step fails")
 	}
-	if h.tx.committed {
+	if h.begin.lastTx().committed {
 		t.Error("transaction must not commit on failure")
 	}
 }
@@ -447,10 +555,10 @@ func TestRegisterRollsBackWhenTokenIssuanceFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("Register expected token-issuance failure")
 	}
-	if !h.tx.rolledBack {
+	if !h.begin.lastTx().rolledBack {
 		t.Error("transaction must be rolled back on token-issuance failure")
 	}
-	if h.tx.committed {
+	if h.begin.lastTx().committed {
 		t.Error("transaction must not commit on failure")
 	}
 }

@@ -33,6 +33,27 @@ type DeviceInfo struct {
 	AppVersion *string
 }
 
+// ValidateDeviceID checks a client-supplied device id (DEVM-1: validated,
+// collision-resistant identity). It returns *ValidationError{Field:
+// "device_id"} on failure.
+func ValidateDeviceID(id string) error {
+	if id == "" {
+		return &ValidationError{Field: "device_id", Reason: "required"}
+	}
+	if len(id) > 64 {
+		return &ValidationError{Field: "device_id", Reason: "too_long"}
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-':
+		default:
+			return &ValidationError{Field: "device_id", Reason: "invalid_charset"}
+		}
+	}
+	return nil
+}
+
 // Session is one device session — the session registry row (DATABASE.md §4.4).
 type Session struct {
 	ID                 int64

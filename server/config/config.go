@@ -59,6 +59,12 @@ type Config struct {
 	// IDGenNodeID is this instance's idgen node id (0–1023); each instance in a
 	// deployment must use a distinct value.
 	IDGenNodeID int
+
+	// LoginMaxFailures is the consecutive-failure threshold before an
+	// identifier locks (SECURITY_SPEC.md AUTH-5).
+	LoginMaxFailures int
+	// LoginLockoutDuration is how long an identifier stays locked (AUTH-5).
+	LoginLockoutDuration time.Duration
 }
 
 // Defaults for local development. Deployed environments override via env vars.
@@ -74,13 +80,15 @@ const (
 	// APP_ENV=dev and APP_PG_DSN is unset.
 	localPGDSN = "postgres://app:app_password@localhost:5432/inchat?sslmode=disable"
 
-	defaultJWTIssuer       = "https://api.socialmedia.example"
-	defaultJWTAudience     = "inchat-api"
-	defaultAccessTokenTTL  = 15 * time.Minute
-	defaultRefreshTokenTTL = 30 * 24 * time.Hour
-	defaultArgon2Memory    = 64 * 1024 // 64 MiB (OWASP-recommended floor)
-	defaultArgon2Time      = 3
-	defaultArgon2Threads   = 4
+	defaultJWTIssuer        = "https://api.socialmedia.example"
+	defaultJWTAudience      = "inchat-api"
+	defaultAccessTokenTTL   = 15 * time.Minute
+	defaultRefreshTokenTTL  = 30 * 24 * time.Hour
+	defaultArgon2Memory     = 64 * 1024 // 64 MiB (OWASP-recommended floor)
+	defaultArgon2Time       = 3
+	defaultArgon2Threads    = 4
+	defaultLoginMaxFailures = 5
+	defaultLoginLockout     = 5 * time.Minute
 )
 
 // Load reads configuration from the environment, applies defaults, and
@@ -88,24 +96,26 @@ const (
 // misconfigured server fails fast before binding anything.
 func Load() (Config, error) {
 	cfg := Config{
-		AppEnv:            getEnv("APP_ENV", "dev"),
-		HTTPPort:          getEnv("APP_HTTP_PORT", defaultHTTPPort),
-		ReadHeaderTimeout: getDuration("APP_HTTP_READ_HEADER_TIMEOUT", defaultReadHeaderTimeout),
-		ShutdownTimeout:   getDuration("APP_SHUTDOWN_TIMEOUT", defaultShutdownTimeout),
-		PGDSN:             os.Getenv("APP_PG_DSN"),
-		PGMaxConns:        int32(getInt("APP_PG_MAX_CONNS", defaultPGMaxConns)),
-		RedisAddr:         getEnv("APP_REDIS_ADDR", defaultRedisAddr),
-		RedisPassword:     os.Getenv("APP_REDIS_PASSWORD"),
-		RedisDB:           getInt("APP_REDIS_DB", defaultRedisDB),
-		JWTIssuer:         getEnv("APP_JWT_ISSUER", defaultJWTIssuer),
-		JWTAudience:       getEnv("APP_JWT_AUDIENCE", defaultJWTAudience),
-		JWTPrivateKey:     os.Getenv("APP_JWT_PRIVATE_KEY"),
-		AccessTokenTTL:    getDuration("APP_ACCESS_TOKEN_TTL", defaultAccessTokenTTL),
-		RefreshTokenTTL:   getDuration("APP_REFRESH_TOKEN_TTL", defaultRefreshTokenTTL),
-		Argon2Memory:      getInt("APP_ARGON2_MEMORY_KIB", defaultArgon2Memory),
-		Argon2Time:        getInt("APP_ARGON2_TIME", defaultArgon2Time),
-		Argon2Threads:     getInt("APP_ARGON2_THREADS", defaultArgon2Threads),
-		IDGenNodeID:       getInt("APP_IDGEN_NODE_ID", 0),
+		AppEnv:               getEnv("APP_ENV", "dev"),
+		HTTPPort:             getEnv("APP_HTTP_PORT", defaultHTTPPort),
+		ReadHeaderTimeout:    getDuration("APP_HTTP_READ_HEADER_TIMEOUT", defaultReadHeaderTimeout),
+		ShutdownTimeout:      getDuration("APP_SHUTDOWN_TIMEOUT", defaultShutdownTimeout),
+		PGDSN:                os.Getenv("APP_PG_DSN"),
+		PGMaxConns:           int32(getInt("APP_PG_MAX_CONNS", defaultPGMaxConns)),
+		RedisAddr:            getEnv("APP_REDIS_ADDR", defaultRedisAddr),
+		RedisPassword:        os.Getenv("APP_REDIS_PASSWORD"),
+		RedisDB:              getInt("APP_REDIS_DB", defaultRedisDB),
+		JWTIssuer:            getEnv("APP_JWT_ISSUER", defaultJWTIssuer),
+		JWTAudience:          getEnv("APP_JWT_AUDIENCE", defaultJWTAudience),
+		JWTPrivateKey:        os.Getenv("APP_JWT_PRIVATE_KEY"),
+		AccessTokenTTL:       getDuration("APP_ACCESS_TOKEN_TTL", defaultAccessTokenTTL),
+		RefreshTokenTTL:      getDuration("APP_REFRESH_TOKEN_TTL", defaultRefreshTokenTTL),
+		Argon2Memory:         getInt("APP_ARGON2_MEMORY_KIB", defaultArgon2Memory),
+		Argon2Time:           getInt("APP_ARGON2_TIME", defaultArgon2Time),
+		Argon2Threads:        getInt("APP_ARGON2_THREADS", defaultArgon2Threads),
+		IDGenNodeID:          getInt("APP_IDGEN_NODE_ID", 0),
+		LoginMaxFailures:     getInt("APP_LOGIN_MAX_FAILURES", defaultLoginMaxFailures),
+		LoginLockoutDuration: getDuration("APP_LOGIN_LOCKOUT_DURATION", defaultLoginLockout),
 	}
 
 	// Local dev convenience: a default DSN matching the compose stack.
@@ -185,6 +195,12 @@ func (c Config) Validate() error {
 	if c.IDGenNodeID < 0 || c.IDGenNodeID > 1023 {
 		errs = append(errs, "APP_IDGEN_NODE_ID must be in [0, 1023]")
 	}
+	if c.LoginMaxFailures < 1 {
+		errs = append(errs, "APP_LOGIN_MAX_FAILURES must be >= 1")
+	}
+	if c.LoginLockoutDuration <= 0 {
+		errs = append(errs, "APP_LOGIN_LOCKOUT_DURATION must be > 0")
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(errs, "\n  - "))
@@ -211,11 +227,12 @@ func (c Config) String() string {
 		key = "xxxxx"
 	}
 	return fmt.Sprintf(
-		"{AppEnv:%s HTTPPort:%s ReadHeaderTimeout:%s ShutdownTimeout:%s PGDSN:%s PGMaxConns:%d RedisAddr:%s RedisPassword:%s RedisDB:%d JWTIssuer:%s JWTAudience:%s JWTPrivateKey:%s AccessTokenTTL:%s RefreshTokenTTL:%s Argon2:%d/%d/%d IDGenNodeID:%d}",
+		"{AppEnv:%s HTTPPort:%s ReadHeaderTimeout:%s ShutdownTimeout:%s PGDSN:%s PGMaxConns:%d RedisAddr:%s RedisPassword:%s RedisDB:%d JWTIssuer:%s JWTAudience:%s JWTPrivateKey:%s AccessTokenTTL:%s RefreshTokenTTL:%s Argon2:%d/%d/%d IDGenNodeID:%d LoginPolicy:%d/%s}",
 		c.AppEnv, c.HTTPPort, c.ReadHeaderTimeout, c.ShutdownTimeout,
 		dsn, c.PGMaxConns, c.RedisAddr, pass, c.RedisDB,
 		c.JWTIssuer, c.JWTAudience, key, c.AccessTokenTTL, c.RefreshTokenTTL,
 		c.Argon2Memory, c.Argon2Time, c.Argon2Threads, c.IDGenNodeID,
+		c.LoginMaxFailures, c.LoginLockoutDuration,
 	)
 }
 

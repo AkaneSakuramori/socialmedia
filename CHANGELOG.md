@@ -111,3 +111,40 @@ versioning follows [SemVer](https://semver.org/).
 #### Applied
 - Migration `000002_auth` applied to the dev stack; verified tables,
   constraints, indexes and the `set_updated_at` trigger in PostgreSQL.
+
+### Sprint 1 — Authentication & Identity (milestone 2: login & lockout)
+
+#### Added
+- **`server/internal/auth/domain/errors.go`** — auth domain errors:
+  `ErrInvalidCredentials`, `ErrAccountSuspended`, `ErrUnsupportedLoginMethod`,
+  `ErrSessionNotFound`, and `AccountLockedError` (AUTH-5, carries the remaining
+  lockout for `Retry-After`).
+- **`server/internal/auth/domain/ports.go`** — `LoginMethod`
+  (password/otp/passkey), `LoginPolicy` + `DefaultLoginPolicy` (AUTH-5:
+  5 fails → 5 min), `LoginThrottle` (per-identifier failure counter shared by
+  all credential methods, PASS-6/OTP-3), `AuditLogger`/`AuditEvent` (AUTH-7),
+  and `SessionRepository.FindByDeviceID`/`Update` for device session upsert.
+- **`server/internal/auth/domain/session.go`** — `ValidateDeviceID`
+  (DEVM-1: required, ≤64 chars, restricted charset).
+- **`server/internal/auth/domain/credential.go`** — `Credential.PasswordHash()`
+  to read the PHC payload from `credential_data`.
+- **`server/internal/auth/application/login.go`** — `Login` use-case
+  (API.md §4.3): lockout gate → account lookup (suspended blocked, deleted
+  non-enumerated) → credential verify (Argon2id constant-time / OTP) →
+  per-device session upsert/rotate with token pair in one transaction.
+  Timing-equalization dummy verify prevents account enumeration through
+  response time. Best-effort audit of `auth.login*` events (AUTH-7).
+- **`server/internal/auth/infra/throttle/redis.go`** — Redis-backed
+  `LoginThrottle`: failure counter with TTL = lockout window, so the lockout
+  expires naturally; concurrency-safe via atomic INCR.
+- **`server/config`** — `APP_LOGIN_MAX_FAILURES` (default 5) and
+  `APP_LOGIN_LOCKOUT_DURATION` (default 5m) with validation; documented in
+  `server/.env.example` and `server/README.md`.
+
+#### Changed
+- `Service` interface now exposes `Login(ctx, LoginCommand)`; `Deps` gained
+  `Throttle`, `Policy`, and `Audit`.
+
+#### Verified
+- `make ci` green; Redis throttle integration-checked against the live stack
+  (3 fails → locked → window expiry → clear).
