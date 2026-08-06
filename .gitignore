@@ -1,6 +1,24 @@
+# Python (project venv convention — always use venv for python tooling)
 venv/
 __pycache__/
 *.pyc
-.DS_Store
+
+# Local environment files (DEVOPS.md §6: only .env.example is committed)
 .env
 .env.*
+!.env.example
+server/.env.local
+
+# Go
+server/bin/
+server/coverage.out
+
+# Build artifacts
+dist/
+tmp/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

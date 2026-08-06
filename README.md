@@ -4,9 +4,9 @@
 
 InChat is a social media and messaging platform designed and engineered for India first — from the ground up. It pairs a modern, offline-first Flutter app with a high-performance Go backend, built to deliver fast, reliable messaging on the real-world devices and networks that India runs on.
 
-> **Status:** Design finalized · Go backend foundation (Sprint 0) shipped · Sprint 1 in progress (registration, login + lockout, refresh rotation with reuse detection, device/session management with logout, and account security & recovery — forgot/reset/change password, verified email/phone change, soft delete + restore, login history, audit log — all landed).
+> **Status:** Design finalized · Go backend foundation (Sprint 0) shipped · Sprint 1 shipped (registration, login + lockout, refresh rotation with reuse detection, device/session management with logout, account security & recovery — forgot/reset/change password, verified email/phone change, soft delete + restore, login history, audit log) · Sprint 2 in progress (conversations & messaging shipped; realtime WebSocket gateway landed).
 >
-> This repository is the **public home of InChat's engineering documentation** — the source of truth for the product: architecture, database, API, backend and Flutter engineering guides, DevOps, quality/release, and security standards. It intentionally contains **documentation only**; production code lives in the **[InChat code repository](https://github.com/AkaneSakuramori/inchat)**.
+> This repository is the **single source of truth for InChat**: the engineering documentation (architecture, database, API, backend and Flutter engineering guides, DevOps, quality/release, and security standards) plus the **Go backend** implementation under `server/`.
 
 ---
 
@@ -60,9 +60,50 @@ InChat is a social media and messaging platform designed and engineered for Indi
 │   ├── DEVOPS.md            # DevOps & infrastructure handbook
 │   ├── QA.md                # QA, testing & release engineering handbook
 │   ├── SECURITY.md          # Security & cryptography handbook
-│   └── SECURITY_SPEC.md     # Normative security requirements specification
+│   ├── SECURITY_SPEC.md     # Normative security requirements specification
+│   └── ENGINEERING_RULES.md # House law: rules for every engineer and AI agent
+├── server/                  # Go backend (modular monolith) — Sprint 0 foundation
+│   ├── cmd/api-server/      # Thin entrypoint (load config → wire → start)
+│   ├── config/              # Typed, validated, env-only configuration
+│   ├── internal/app/        # Composition root (DI, lifecycle, graceful shutdown)
+│   ├── internal/platform/   # apierr · observability · health · httpserver · postgres · redis
+│   ├── migrations/          # golang-migrate SQL migrations
+│   └── Dockerfile           # Multi-stage → distroless non-root image
+├── infra/docker/            # docker-compose: PostgreSQL, Redis, api-server, migrate
+├── scripts/                 # dev.sh, check.sh, smoke.py (venv python)
+├── .github/workflows/       # CI (every PR) + CD (on tag) skeleton
+├── AGENTS.md                # Agent entry point → ENGINEERING_RULES.md
 └── README.md
 ```
+
+---
+
+## Backend Quickstart
+
+Requirements: Go 1.24+, Docker + Docker Compose, Python 3 (venv).
+
+```sh
+make dev-up      # start PostgreSQL + Redis (compose)
+make migrate     # apply server/migrations/ to local PG
+make dev-api     # run the api-server locally (port 8080)
+```
+
+Verify:
+
+```sh
+curl localhost:8080/healthz    # {"status":"ok"}
+curl localhost:8080/readyz     # {"status":"ready","checks":[...]}
+make health                    # smoke via venv python
+```
+
+Full stack in Docker (build + api-server + deps):
+
+```sh
+make run
+```
+
+See `server/README.md` for the backend handbook. Web client (TypeScript) lives in
+its own repository; the Flutter mobile client is a later sprint.
 
 ---
 
@@ -99,8 +140,12 @@ See `SECURITY.md` and `SECURITY_SPEC.md` for the full standard.
 ## Roadmap
 
 - [x] **Phase 0 — Design:** architecture, database, API, and engineering documentation finalized
+<<<<<<< HEAD
 - [x] **Sprint 0 — Backend Foundation:** modular Go monolith skeleton — config, DI, logging, RFC 9457 errors, health probes, PostgreSQL/Redis, Docker/Compose, CI/CD
 - [ ] **Sprint 1 — Auth & Identity:** registration, login (password/OTP, AUTH-5 lockout), refresh-token rotation with reuse detection, device/session management with logout (list/rename/revoke/sign-out-all, SESS-3/SESS-6), and account security & recovery (forgot/reset/change password, verified email/phone change, soft delete + grace-window restore + purge, login history, risk escalation hooks, audit log) shipped in `internal/auth`; self-service OTP and HTTP delivery (`/v1/auth/*`) remain
+=======
+- [x] **Sprint 0 — Foundation:** Go backend skeleton, config/DI/logging/errors, health probes, Docker/Compose, migrations, Makefile, CI skeleton
+>>>>>>> 03f1943 (feat: Sprint 0 Go backend foundation (no business features))
 - [ ] **Phase 1 — India launch:** application code (backend + Flutter app), infrastructure, canary releases, staged app rollout
 - [ ] **Phase 2 — Scale:** India-scale growth, passkeys as default, key transparency, E2EE pilot
 - [ ] **Phase 3 — Global:** multi-region, GDPR posture, end-to-end encryption mode

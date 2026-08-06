@@ -1,0 +1,21 @@
+# InChat Go linter configuration (ENGINEERING.md §36, DEVOPS.md §8 CI gate).
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - misspell
+    - gofmt
+    - goimports
+
+issues:
+  exclude-rules:
+    - path: _test\.go$
+      linters:
+        - errcheck

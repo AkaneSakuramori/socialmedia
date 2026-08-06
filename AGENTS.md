@@ -1,9 +1,9 @@
 # AGENTS.md — InChat Repository Guide
 
-This repository holds the **InChat** messaging platform (India-first) and its
-complete engineering documentation. There is no application code here yet —
-Phase 0 (design) is complete; the Go backend, Flutter app, and TypeScript web
-client are built from these documents.
+This repository is the home of the **InChat** messaging platform (India-first):
+the finalized engineering documentation (`architecture/`) and, from Sprint 0,
+the **Go backend foundation** (`server/`). The Flutter mobile app and the
+TypeScript web client (in its own repository) are built from these documents.
 
 ## Before you write anything
 
@@ -28,6 +28,11 @@ client are built from these documents.
 3. The **stack is fixed**: Go (server) · Flutter (mobile) · TypeScript web
    client · PostgreSQL · Redis · Docker · Terraform · Cloudflare · WebSockets.
    Never propose a replacement without justification.
+4. Backend work happens under `server/`. Follow its structure (`cmd/`,
+   `internal/` domains with `delivery/application/domain/infra` four-layer
+   convention, `internal/platform/` as a dependency-free leaf, `config/` never
+   imported by business code) — `ENGINEERING.md` §2–§3. Run `make ci` before
+   finishing any backend change.
 
 ## Non-negotiable for agents
 

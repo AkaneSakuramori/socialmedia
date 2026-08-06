@@ -1,0 +1,46 @@
+# InChat CD — skeleton (DEVOPS.md §8). Runs on version tags: build the image
+# once, push to the registry, then deploy to staging. Promotion to prod and
+# canary rollout are wired once the registry + Terraform environments exist.
+
+name: CD
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Test
+        working-directory: server
+        run: go test -race ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # TODO(Sprint 1): authenticate to the registry, tag images :sha and :tag,
+      # build once, promote the same digest (DEVOPS.md §5).
+
+      - name: Build image (no registry push yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: server
+          push: false
+          tags: inchat-api-server:${{ github.ref_name }}
+          build-args: VERSION=${{ github.ref_name }}
+
+  # TODO(Sprint 1): deploy-to-staging job with smoke gate (health + send/receive)
+  # and a promote-to-prod job with canary + metric-based auto-rollback.

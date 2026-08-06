@@ -1,0 +1,11 @@
+.git
+.gitignore
+**/.gitkeep
+Dockerfile
+.dockerignore
+*.md
+.env*
+Makefile
+bin/
+dist/
+tmp/
