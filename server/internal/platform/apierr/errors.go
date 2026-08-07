@@ -13,8 +13,9 @@ import (
 // Code is a stable, machine-readable error code from API.md Appendix A.
 type Code string
 
-// Core codes used by the foundation. Domain codes are added as features land
-// (e.g. USER_NOT_FOUND, CONVERSATION_NOT_FOUND, QUOTA_EXCEEDED).
+// Core codes used by the foundation, plus the chat/auth codes the messaging
+// milestones need (API.md Appendix A). Codes are the only wire field clients
+// switch on; HTTP status and title are derived from them.
 const (
 	CodeValidationError    Code = "VALIDATION_ERROR"
 	CodeUnauthorized       Code = "UNAUTHORIZED"
@@ -25,6 +26,22 @@ const (
 	CodePayloadTooLarge    Code = "PAYLOAD_TOO_LARGE"
 	CodeInternal           Code = "INTERNAL_ERROR"
 	CodeServiceUnavailable Code = "SERVICE_UNAVAILABLE"
+
+	// Authentication / session codes (gateway + auth, API.md Appendix A).
+	CodeTokenExpired     Code = "TOKEN_EXPIRED"
+	CodeTokenRevoked     Code = "TOKEN_REVOKED"
+	CodeSessionRevoked   Code = "SESSION_REVOKED"
+	CodeAccountSuspended Code = "ACCOUNT_SUSPENDED"
+	CodeAccountDeleted   Code = "ACCOUNT_DELETED"
+
+	// Chat/domain codes (API.md Appendix A).
+	CodeUserNotFound         Code = "USER_NOT_FOUND"
+	CodeConversationNotFound Code = "CONVERSATION_NOT_FOUND"
+	CodeBlocked              Code = "BLOCKED"
+	CodeNotAMember           Code = "NOT_A_MEMBER"
+	CodeInsufficientRole     Code = "INSUFFICIENT_ROLE"
+	CodeDirectExists         Code = "DIRECT_EXISTS"
+	CodeQuotaExceeded        Code = "QUOTA_EXCEEDED"
 )
 
 // codeMeta describes a code's HTTP status and human title.
@@ -43,6 +60,20 @@ var metaByCode = map[Code]codeMeta{
 	CodePayloadTooLarge:    {status: http.StatusRequestEntityTooLarge, title: "Payload Too Large"},
 	CodeInternal:           {status: http.StatusInternalServerError, title: "Internal Error"},
 	CodeServiceUnavailable: {status: http.StatusServiceUnavailable, title: "Service Unavailable"},
+
+	CodeTokenExpired:     {status: http.StatusUnauthorized, title: "Token Expired"},
+	CodeTokenRevoked:     {status: http.StatusUnauthorized, title: "Token Revoked"},
+	CodeSessionRevoked:   {status: http.StatusUnauthorized, title: "Session Revoked"},
+	CodeAccountSuspended: {status: http.StatusForbidden, title: "Account Suspended"},
+	CodeAccountDeleted:   {status: http.StatusForbidden, title: "Account Deleted"},
+
+	CodeUserNotFound:         {status: http.StatusNotFound, title: "User Not Found"},
+	CodeConversationNotFound: {status: http.StatusNotFound, title: "Conversation Not Found"},
+	CodeBlocked:              {status: http.StatusForbidden, title: "Blocked"},
+	CodeNotAMember:           {status: http.StatusForbidden, title: "Not A Member"},
+	CodeInsufficientRole:     {status: http.StatusForbidden, title: "Insufficient Role"},
+	CodeDirectExists:         {status: http.StatusConflict, title: "Direct Conversation Exists"},
+	CodeQuotaExceeded:        {status: http.StatusTooManyRequests, title: "Quota Exceeded"},
 }
 
 // FieldError is a field-level validation problem (API.md §2.5 errors[]).
@@ -129,6 +160,66 @@ func NotFound(detail string) *Error {
 // Conflict reports a resource conflict (409).
 func Conflict(detail string) *Error {
 	return &Error{Code: CodeConflict, Detail: detail}
+}
+
+// TokenExpired reports an expired access token (401, retryable via refresh).
+func TokenExpired(detail string) *Error {
+	return &Error{Code: CodeTokenExpired, Detail: detail, Retryable: true}
+}
+
+// TokenRevoked reports a token whose token-version claim is stale (401).
+func TokenRevoked(detail string) *Error {
+	return &Error{Code: CodeTokenRevoked, Detail: detail}
+}
+
+// SessionRevoked reports that the token's session was revoked (401).
+func SessionRevoked(detail string) *Error {
+	return &Error{Code: CodeSessionRevoked, Detail: detail}
+}
+
+// AccountSuspended reports a suspended account (403).
+func AccountSuspended(detail string) *Error {
+	return &Error{Code: CodeAccountSuspended, Detail: detail}
+}
+
+// AccountDeleted reports a deleted account (403).
+func AccountDeleted(detail string) *Error {
+	return &Error{Code: CodeAccountDeleted, Detail: detail}
+}
+
+// UserNotFound reports a missing user (404).
+func UserNotFound(detail string) *Error {
+	return &Error{Code: CodeUserNotFound, Detail: detail}
+}
+
+// ConversationNotFound reports a missing conversation (404).
+func ConversationNotFound(detail string) *Error {
+	return &Error{Code: CodeConversationNotFound, Detail: detail}
+}
+
+// Blocked reports that the target user blocked the caller (403).
+func Blocked(detail string) *Error {
+	return &Error{Code: CodeBlocked, Detail: detail}
+}
+
+// NotAMember reports that the caller is not in the conversation (403).
+func NotAMember(detail string) *Error {
+	return &Error{Code: CodeNotAMember, Detail: detail}
+}
+
+// InsufficientRole reports that the caller's role is too low (403).
+func InsufficientRole(detail string) *Error {
+	return &Error{Code: CodeInsufficientRole, Detail: detail}
+}
+
+// DirectExists reports that a direct conversation already exists (409).
+func DirectExists(detail string) *Error {
+	return &Error{Code: CodeDirectExists, Detail: detail}
+}
+
+// QuotaExceeded reports that the caller hit a per-user quota (429).
+func QuotaExceeded(detail string) *Error {
+	return &Error{Code: CodeQuotaExceeded, Detail: detail}
 }
 
 // RateLimited reports that the caller exceeded a rate limit (429, retryable).

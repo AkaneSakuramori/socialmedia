@@ -190,6 +190,26 @@ func (r *SessionRepo) RevokeOthersByUserID(ctx context.Context, dbtx tx.Tx, user
 	return err
 }
 
+// SuspendOthersByUserID suspends every active session of the user except the
+// caller's current one (PASS-4 / SESS-4).
+func (r *SessionRepo) SuspendOthersByUserID(ctx context.Context, dbtx tx.Tx, userID, keepSessionID int64) error {
+	_, err := dbtx.Exec(ctx, `
+		UPDATE user_sessions SET state = 'suspended', updated_at = now()
+		WHERE user_id = $1 AND id <> $2 AND state = 'active'`,
+		userID, keepSessionID)
+	return err
+}
+
+// SuspendAllByUserID suspends every active session of the user (REC-4: a
+// password reset invalidates all current sessions).
+func (r *SessionRepo) SuspendAllByUserID(ctx context.Context, dbtx tx.Tx, userID int64) error {
+	_, err := dbtx.Exec(ctx, `
+		UPDATE user_sessions SET state = 'suspended', updated_at = now()
+		WHERE user_id = $1 AND state = 'active'`,
+		userID)
+	return err
+}
+
 // Rename updates the device label of an active session owned by the user.
 func (r *SessionRepo) Rename(ctx context.Context, dbtx tx.Tx, userID, sessionID int64, name string) error {
 	n, err := dbtx.Exec(ctx, `

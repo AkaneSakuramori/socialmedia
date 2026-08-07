@@ -23,7 +23,7 @@ func newTestServer(t *testing.T) *http.Server {
 	log := observability.NewLogger("test")
 	liveness := health.Handler(log, reg, false)
 	readiness := health.Handler(log, reg, true)
-	return New(cfg, log, liveness, readiness)
+	return New(cfg, log, liveness, readiness, nil)
 }
 
 func do(t *testing.T, srv *http.Server, path string) *httptest.ResponseRecorder {
@@ -56,7 +56,7 @@ func TestReadinessFailsWhenDependencyDown(t *testing.T) {
 	reg := health.NewRegistry()
 	reg.Register("redis", health.CheckFunc(func(context.Context) error { return context.DeadlineExceeded }))
 	log := observability.NewLogger("test")
-	srv := New(cfg, log, health.Handler(log, reg, false), health.Handler(log, reg, true))
+	srv := New(cfg, log, health.Handler(log, reg, false), health.Handler(log, reg, true), nil)
 
 	if rec := do(t, srv, "/readyz"); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("/readyz status = %d, want 503 when dependency down", rec.Code)

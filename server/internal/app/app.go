@@ -6,17 +6,33 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/AkaneSakuramori/socialmedia/server/config"
+	authapp "github.com/AkaneSakuramori/socialmedia/server/internal/auth/application"
+	authdomain "github.com/AkaneSakuramori/socialmedia/server/internal/auth/domain"
+	authotp "github.com/AkaneSakuramori/socialmedia/server/internal/auth/infra/otp"
+	authpostgres "github.com/AkaneSakuramori/socialmedia/server/internal/auth/infra/postgres"
+	authsecurity "github.com/AkaneSakuramori/socialmedia/server/internal/auth/infra/security"
+	auththrottle "github.com/AkaneSakuramori/socialmedia/server/internal/auth/infra/throttle"
+	chatapp "github.com/AkaneSakuramori/socialmedia/server/internal/chat/application"
+	chathttp "github.com/AkaneSakuramori/socialmedia/server/internal/chat/delivery/http"
+	chatpostgres "github.com/AkaneSakuramori/socialmedia/server/internal/chat/infra/postgres"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/health"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/httpserver"
+	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/idgen"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/observability"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/postgres"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/redis"
+	"github.com/AkaneSakuramori/socialmedia/server/pkg/clock"
 )
 
 // Version is injected at build time via -ldflags "-X .../internal/app.Version=...".
@@ -64,7 +80,73 @@ func Run(ctx context.Context) error {
 
 	liveness := health.Handler(log, reg, false)
 	readiness := health.Handler(log, reg, true)
-	srv := httpserver.New(cfg, log, liveness, readiness)
+
+	// --- Domain wiring (ENGINEERING.md §10.2). ---------------------------
+	ids, err := idgen.New(cfg.IDGenNodeID, idgen.DefaultEpoch)
+	if err != nil {
+		return fmt.Errorf("idgen: %w", err)
+	}
+	beginner := postgres.NewBeginner(pool)
+	clk := clock.System()
+
+	tokenFactory, err := loadTokenFactory(cfg, log)
+	if err != nil {
+		return err
+	}
+	hasher, err := authsecurity.NewArgon2ID(authsecurity.Argon2Params{
+		Memory:      uint32(cfg.Argon2Memory),
+		Iterations:  uint32(cfg.Argon2Time),
+		Parallelism: uint8(cfg.Argon2Threads),
+		SaltLen:     16,
+		KeyLen:      32,
+	})
+	if err != nil {
+		return fmt.Errorf("argon2: %w", err)
+	}
+	otpVerifier := authotp.New(redisClient)
+	throttle := auththrottle.New(redisClient, authdomain.DefaultLoginPolicy())
+
+	userRepo := authpostgres.NewUserRepo(pool)
+	authSvc := authapp.New(authapp.Deps{
+		Users:       userRepo,
+		Credentials: authpostgres.NewCredentialRepo(pool),
+		Sessions:    authpostgres.NewSessionRepo(pool),
+		Hasher:      hasher,
+		Tokens:      tokenFactory,
+		OTP:         otpVerifier,
+		Throttle:    throttle,
+		Policy:      authdomain.DefaultLoginPolicy(),
+		Audit:       authpostgres.NewAuditLog(pool, log),
+		IDs:         ids,
+		TxBeginner:  beginner,
+		Clock:       clk,
+
+		SessionIdleTimeout: cfg.SessionIdleTimeout,
+		SessionRetention:   cfg.SessionRetention,
+
+		AuthTokens:                 authpostgres.NewAuthTokenRepo(pool),
+		LoginHistory:               authpostgres.NewLoginHistoryRepo(pool),
+		Risk:                       authdomain.PermissiveRisk(),
+		Notifier:                   authdomain.NoopNotifier(),
+		Verifier:                   tokenFactory,
+		PasswordResetTokenTTL:      cfg.PasswordResetTokenTTL,
+		ChangeVerificationTokenTTL: cfg.ChangeVerificationTokenTTL,
+		DeletionGracePeriod:        cfg.DeletionGracePeriod,
+	})
+
+	chatSvc := chatapp.New(chatapp.Deps{
+		Conversations: chatpostgres.NewConversationRepo(pool),
+		Memberships:   chatpostgres.NewMembershipRepo(pool),
+		Sequences:     chatpostgres.NewSequenceRepo(),
+		ChangeLog:     chatpostgres.NewChangeLogRepo(pool),
+		Users:         userRepo,
+		IDs:           ids,
+		TxBeginner:    beginner,
+		Clock:         clk,
+	})
+
+	chatRoutes := chathttp.New(chatSvc, authSvc, redisClient)
+	srv := httpserver.New(cfg, log, liveness, readiness, chatRoutes.Router())
 
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -94,6 +176,40 @@ func Run(ctx context.Context) error {
 	// Defers close Redis, then the pool, in reverse order.
 	log.Info("api-server stopped cleanly")
 	return nil
+}
+
+// loadTokenFactory builds the JWT signer/verifier. In dev with no configured
+// key it generates an ephemeral one so the process boots without setup;
+// production requires APP_JWT_PRIVATE_KEY (config validates this).
+func loadTokenFactory(cfg config.Config, log *slog.Logger) (*authsecurity.TokenFactory, error) {
+	var key ed25519.PrivateKey
+	switch {
+	case cfg.JWTPrivateKey != "":
+		seed, err := base64.StdEncoding.DecodeString(cfg.JWTPrivateKey)
+		if err != nil {
+			return nil, fmt.Errorf("decode JWT_PRIVATE_KEY: %w", err)
+		}
+		if len(seed) != ed25519.SeedSize {
+			return nil, fmt.Errorf("JWT_PRIVATE_KEY must be %d bytes, got %d", ed25519.SeedSize, len(seed))
+		}
+		key = ed25519.NewKeyFromSeed(seed)
+	case cfg.AppEnv == "dev":
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return nil, err
+		}
+		key = priv
+		log.Warn("no APP_JWT_PRIVATE_KEY configured; using ephemeral key (dev only)")
+	default:
+		return nil, errors.New("JWT_PRIVATE_KEY is required outside dev")
+	}
+	return authsecurity.NewTokenFactory(authsecurity.TokenConfig{
+		SigningKey: key,
+		Issuer:     cfg.JWTIssuer,
+		Audience:   cfg.JWTAudience,
+		AccessTTL:  cfg.AccessTokenTTL,
+		RefreshTTL: cfg.RefreshTokenTTL,
+	})
 }
 
 // Healthcheck verifies runtime connectivity for container healthchecks

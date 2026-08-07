@@ -42,7 +42,8 @@
 24. [Production Checklist](#24-production-checklist)
 25. [Cost Optimization](#25-cost-optimization)
 26. [Maintenance Procedures](#26-maintenance-procedures)
-27. [Flutter App Release Pipeline](#27-flutter-app-release-pipeline)
+27. [Container Compromise Recovery](#27-container-compromise-recovery)
+28. [Flutter App Release Pipeline](#28-flutter-app-release-pipeline)
 28. [Appendix A — Dashboard & Alert Canon](#appendix-a--dashboard--alert-canon)
 29. [Appendix B — Runbook Index](#appendix-b--runbook-index)
 
@@ -432,7 +433,24 @@ Pre-prod gate (all must pass; this is the launch checklist):
 
 ---
 
-## 27. Flutter App Release Pipeline
+## 27. Container Compromise Recovery
+
+A compromised container is treated as **fully untrusted** — its image layer, writable layer, and every volume it touched. This procedure was executed against the local dev stack in Aug 2026 after `inchat-postgres-1` was found running a crypto-miner/Tor rootkit (`/tmp/.xdiag`, `/tmp/.r.rpk`, `/var/lib/postgresql/.atmp/.applocal.xdiag`, C2 payload from `152.53.46.16`); it is the runbook for any repeat.
+
+1. **Contain and triage** — stop the suspected containers; snapshot `docker inspect`, `docker diff`, and `docker top` output for the incident record. `docker diff` reveals filesystem writes; a clean container shows only `/run`, `/tmp`, `/var/log` entries.
+2. **Verify scope** — check sibling containers and the host: `docker diff` on every service, host crontabs (`/etc/cron*`, `crontab -l`), `ld.so.preload`, `ps aux` for miner names (`xmrig`, `kdevtmpfsi`, `kinsing`, `perfcc`, `.xdiag`). Do not assume the attacker stayed inside one container.
+3. **Destroy, do not repair** — `docker rm -f <container>` and `docker volume rm <volume>` for **every volume the container mounted**. A "cleaned" container cannot be trusted again; its volumes may carry persistence.
+4. **Recreate from pristine images only** — official `postgres:16-alpine` / `redis:7-alpine` images. Verify the image digest against the registry before first use. Never restore from a backup taken from the compromised instance (the backup is untrusted).
+5. **Recreate the schema from migrations only** — apply `migrations/` from scratch (no data restore).
+6. **Rotate every credential** the stack used — DB superuser, per-role (`app`, `migrator`) passwords, and any secrets the compromised process could have read. Regenerate JWT signing keys too. Secrets live in `infra/docker/.env` (gitignored), injected at runtime (`docker-compose.yml` interpolates `${...}`; init roles are created by `01-bootstrap.sh` which reads the same env). Nothing is committed.
+7. **Verify the replacement** — `docker diff` shows only benign runtime entries, no `initdb.d` failures, roles/extensions present, `schema_migrations` clean, and the app role can read the schema. Then re-run `make test-integration`.
+8. **Document** — append the incident summary (indicators, scope, actions, credentials rotated) to the incident record in this repository.
+
+The compromised local container and its volumes (`inchat_pgdata`, `inchat_redisdata`) were destroyed and rebuilt under this procedure; the redis and api-server containers showed no filesystem writes and the host showed no miner processes or persistence.
+
+---
+
+## 28. Flutter App Release Pipeline
 
 The app is a first-class release surface; it ships on a **different cadence than the backend** and has its own lifecycle.
 

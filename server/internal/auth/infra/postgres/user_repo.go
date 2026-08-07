@@ -48,6 +48,37 @@ func (r *UserRepo) FindByID(ctx context.Context, id int64) (*userdomain.User, er
 	return u, nil
 }
 
+// ListByIDs loads the live users with the given ids, omitting unknown or
+// deleted accounts (used for bulk display-name resolution by the chat module).
+func (r *UserRepo) ListByIDs(ctx context.Context, ids []int64) ([]userdomain.User, error) {
+	if len(ids) == 0 {
+		return []userdomain.User{}, nil
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+userColumns+` FROM users
+		 WHERE id = ANY($1) AND account_state <> 'deleted'`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]userdomain.User, 0, len(ids))
+	for rows.Next() {
+		var u userdomain.User
+		if err := rows.Scan(
+			&u.ID, &u.Username, &u.DisplayName, &u.PhoneNumber, &u.Email,
+			&u.AccountState, &u.PrimaryIdentifier, &u.TokenVersion,
+			&u.CreatedAt, &u.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("user: scan: %w", err)
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // findActiveOrSuspended loads a non-deleted account by column.
 func (r *UserRepo) findActiveOrSuspended(ctx context.Context, column, value string) (*userdomain.User, error) {
 	u, err := scanUser(r.pool.QueryRow(ctx,

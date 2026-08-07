@@ -6,6 +6,65 @@ versioning follows [SemVer](https://semver.org/). Newest entries appear first.
 
 ## [Unreleased]
 
+### Sprint 2 — Core Messaging (milestone 1: conversation domain, delivery wiring & database recovery)
+
+#### Added
+- **`server/migrations/000006_conversations`** — `conversations` (type CHECK,
+  group-title CHECK, settings JSONB, retention_days, denormalized
+  `last_message_*` with consistency CHECK), `conversation_members` (roles,
+  monotonic `last_read_seq`/`last_delivered_seq` cursors, mute/pin/archive
+  prefs, invite_state), `conversation_sequences` (durable per-conversation
+  counter, DATABASE.md §5.4) and `change_log` (transactional outbox / sync feed
+  per DATABASE.md §7.1: event_type CHECK, global_seq, affected_user_ids GIN);
+  matching `down.sql`.
+- **`server/internal/chat/domain`** — `Conversation`/`Membership` aggregates,
+  `ConversationRepository`, `MembershipRepository`, `SequenceRepository`,
+  `ChangeLogRepository`, ID generator port, sentinel errors + field-level
+  `ValidationError` (API.md §2.5), settings parsing with defaults.
+- **`server/internal/chat/application`** — the conversation use-cases: create
+  (direct dedupe returns the existing conversation, §7.2), list (chat list with
+  derived unread, filters, keyset pagination, §7.1), get detail (§7.3), group
+  settings update (§7.4), member list/add/remove with role checks (§7.5–§7.7),
+  role change (§7.8), mute/pin/archive prefs (§7.9–§7.11). Every write commits
+  conversation + memberships + sequence row + `change_log` outbox atomically.
+- **`server/internal/chat/delivery/http`** — REST handlers + routes for
+  §7.1–§7.11 with bearer auth and Idempotency-Key gating on unsafe writes;
+  `draft_message` explicitly rejected 422 `not_supported` (never silently
+  dropped).
+- **`server/internal/platform/httpapi`** — shared delivery helpers: bearer
+  gateway, Idempotency-Key middleware (Stripe-style, per-user scope, Redis
+  cache + concurrency lock, 5xx never cached), JSON list envelope, bounded
+  decoding, id/limit parsing; `internal/platform/httpserver.New` gained an
+  `extra http.Handler` mount.
+- **Composition root wiring** — `server/internal/app/app.go` now wires the full
+  stack: real postgres + redis adapters for auth OTP/`SessionRepo` and chat,
+  Ed25519 `loadTokenFactory` (ephemeral dev key with warning, required
+  `APP_JWT_PRIVATE_KEY` outside dev), all six migrations applied.
+- **Tests** — unit suites for `httpapi` (auth gateway, error mapping, parsing,
+  idempotency replay/scope/409-lock/corrupt-cache) and the chat delivery layer
+  (round-trips for §7.1–§7.11); `//go:build integration` postgres suite for the
+  chat repository (CRUD, group-title CHECK, direct-pair dedup, list
+  ordering/pagination/filters, membership lifecycle + ON CONFLICT resurrect,
+  prefs, sequence init, change_log append) and the auth session repo (now
+  requires `APP_PG_DSN`; no committed credentials); `make test-integration`.
+- **Database recovery** — postgres container confirmed compromised (miner
+  toolchain, `/tmp/.xdiag`, busybox rootkit, C2 payload, cron persistence);
+  scope verified (host + redis + api-server clean); compromised container +
+  volumes destroyed; fresh official `postgres:16-alpine` + `redis:7-alpine`
+  from pinned digests; all credentials rotated into gitignored
+  `infra/docker/.env` (mode 600) with `${...}` env interpolation in compose and
+  `01-bootstrap.sql` → `01-bootstrap.sh`; DB rebuilt from migrations only and
+  verified clean; full runbook documented in `architecture/DEVOPS.md` §27.
+
+#### Changed
+- **`server/internal/auth/infra/postgres/session_repo.go`** — added
+  `SuspendAllByUserID` / `SuspendOthersByUserID` so the session repository
+  satisfies the domain port.
+- **`server/internal/auth/infra/otp`** — real Redis-backed OTP verifier
+  (SHA-256 hashed codes, atomic single-use GETDEL, 300s TTL, constant-time
+  compare).
+- **`server/go.mod`** — `miniredis` v2.38.0 added as a test-only dependency.
+
 ### Sprint 1 — Authentication & Identity (milestone 5: account security, recovery & production hardening)
 
 #### Added

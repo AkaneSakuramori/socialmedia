@@ -169,6 +169,14 @@ type TokenIssuer interface {
 	IssuePair(ctx context.Context, sessionID, userID int64, deviceID string, tokenVersion int64, now time.Time) (TokenPair, error)
 }
 
+// TokenVerifier validates an access token at the gateway boundary
+// (SECURITY_SPEC.md JWT-5: signature, algorithm, issuer, audience, expiry).
+// Session validity and token-version freshness are checked separately by the
+// application layer, which compares the claims against the live account.
+type TokenVerifier interface {
+	VerifyAccess(token string) (*AccessClaims, error)
+}
+
 // OTPVerifier verifies a one-time passcode for an identifier (OTP-1: 6 digits,
 // single-use, 300 s TTL, consumed atomically). The delivery layer never sees
 // the code; the real implementation stores hashed codes in Redis.

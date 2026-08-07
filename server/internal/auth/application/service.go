@@ -94,6 +94,13 @@ type Service interface {
 	// ListLoginHistory returns the caller's own login history (login-history
 	// security screen), newest first.
 	ListLoginHistory(ctx context.Context, cmd ListLoginHistoryCommand) ([]LoginEventInfo, error)
+
+	// Authenticate validates an access token at the gateway boundary and
+	// returns the account behind it (SECURITY_SPEC.md JWT-5). It verifies the
+	// JWT signature/expiry, then checks the account state, the token-version
+	// freshness (SESS-6), and that the token's session is still active. The
+	// delivery bearer middleware is the sole caller.
+	Authenticate(ctx context.Context, token, deviceID string) (*userdomain.User, error)
 }
 
 // LoginCommand is the validated input for authentication (API.md §4.3).
@@ -385,6 +392,9 @@ type Deps struct {
 	// Notifier surfaces security events to the account holder. Inject
 	// domain.NoopNotifier() until the notification milestone.
 	Notifier domain.SecurityNotifier
+	// Verifier validates access tokens at the gateway (JWT-5). Inject the
+	// concrete security.TokenFactory. Used by Authenticate.
+	Verifier domain.TokenVerifier
 	// PasswordResetTokenTTL is the lifetime of a password-reset token
 	// (default 30m).
 	PasswordResetTokenTTL time.Duration

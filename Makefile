@@ -69,6 +69,12 @@ test: ## Run all unit tests
 test-race: ## Run all unit tests with the race detector
 	cd $(SERVER_DIR) && go test -race ./...
 
+test-integration: ## Run integration tests against the dev compose stack (make dev-up first)
+	@test -f infra/docker/.env || (echo "infra/docker/.env missing — the local stack is not set up"; exit 1)
+	@cd $(SERVER_DIR) && \
+		APP_PG_DSN="postgres://app:$$(grep -E '^APP_DB_PASSWORD=' ../infra/docker/.env | cut -d= -f2)@localhost:5432/$$(grep -E '^POSTGRES_DB=' ../infra/docker/.env | cut -d= -f2)?sslmode=disable" \
+		go test -tags integration -count=1 -p 1 ./internal/auth/infra/postgres/... ./internal/chat/infra/postgres/...
+
 vet: ## Run go vet
 	cd $(SERVER_DIR) && go vet ./...
 

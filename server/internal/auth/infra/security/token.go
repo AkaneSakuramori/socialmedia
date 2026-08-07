@@ -111,24 +111,15 @@ func (t *TokenFactory) IssuePair(_ context.Context, sessionID, userID int64, dev
 	}, nil
 }
 
-// AccessClaims is the validated claim set returned by VerifyAccess.
-type AccessClaims struct {
-	UserID    int64
-	SessionID int64
-	DeviceID  string
-	Scopes    []string
-	JTI       string
-	// TokenVersion is the ver claim — the user's global token version at
-	// issuance. Gateways compare it against users.token_version (JWT-5).
-	TokenVersion int64
-	ExpiresAt    time.Time
-}
+// AccessClaims aliases the domain claim set so the concrete verifier and the
+// application layer agree on one type (VerifyAccess returns this).
+type AccessClaims = domain.AccessClaims
 
 // VerifyAccess validates signature, method, issuer, audience, and expiry, and
 // returns the claims. This is the gateway trust boundary check
 // (SECURITY_SPEC.md JWT-5); session-validity and token version are checked
-// separately.
-func (t *TokenFactory) VerifyAccess(token string) (*AccessClaims, error) {
+// separately by the auth application.
+func (t *TokenFactory) VerifyAccess(token string) (*domain.AccessClaims, error) {
 	claims := &accessClaims{}
 	parsed, err := jwt.ParseWithClaims(token, claims, func(*jwt.Token) (any, error) {
 		return t.signingKey.Public(), nil
@@ -139,17 +130,23 @@ func (t *TokenFactory) VerifyAccess(token string) (*AccessClaims, error) {
 		jwt.WithExpirationRequired(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("token: parse: %w", err)
+		// Classify the two gateway-relevant failures: expiry (→ 401
+		// TOKEN_EXPIRED, retryable) vs. anything else (→ 401 UNAUTHORIZED).
+		// The application layer matches on the domain sentinels.
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			return nil, fmt.Errorf("token: parse: %w", domain.ErrTokenExpired)
+		}
+		return nil, fmt.Errorf("token: parse: %w", domain.ErrTokenInvalid)
 	}
 	if !parsed.Valid {
-		return nil, errors.New("token: invalid")
+		return nil, fmt.Errorf("token: invalid: %w", domain.ErrTokenInvalid)
 	}
 
 	uid, err := parseSubject(claims.Subject)
 	if err != nil {
 		return nil, fmt.Errorf("token: subject: %w", err)
 	}
-	return &AccessClaims{
+	return &domain.AccessClaims{
 		UserID:       uid,
 		SessionID:    claims.SessionID,
 		DeviceID:     claims.DeviceID,

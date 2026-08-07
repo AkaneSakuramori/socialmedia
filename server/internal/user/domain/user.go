@@ -54,6 +54,11 @@ type UserRepository interface {
 	Create(ctx context.Context, dbtx tx.Tx, u *User) error
 	// FindByID loads a user by id, or ErrUserNotFound.
 	FindByID(ctx context.Context, id int64) (*User, error)
+	// ListByIDs loads the live (non-deleted) users with the given ids. Unknown
+	// ids are silently omitted; the caller decides whether that is an error.
+	// Used by the chat module to resolve participant display names in bulk
+	// (direct titles, group member previews).
+	ListByIDs(ctx context.Context, ids []int64) ([]User, error)
 	// FindByPhone loads an account by normalized E.164 phone.
 	FindByPhone(ctx context.Context, phone string) (*User, error)
 	// FindByEmail loads an account by normalized lowercase email.

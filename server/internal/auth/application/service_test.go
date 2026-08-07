@@ -121,6 +121,15 @@ func (r *fakeUserRepo) FindByID(_ context.Context, id int64) (*userdomain.User, 
 	}
 	return nil, userdomain.ErrUserNotFound
 }
+func (r *fakeUserRepo) ListByIDs(_ context.Context, ids []int64) ([]userdomain.User, error) {
+	var out []userdomain.User
+	for _, id := range ids {
+		if u, ok := r.byID[id]; ok && u.AccountState != userdomain.AccountDeleted {
+			out = append(out, *u)
+		}
+	}
+	return out, nil
+}
 func (r *fakeUserRepo) FindByPhone(_ context.Context, p string) (*userdomain.User, error) {
 	if u, ok := r.byPhone[p]; ok && u.AccountState != userdomain.AccountDeleted {
 		return u, nil
@@ -554,6 +563,32 @@ type fakeTokenIssuer struct {
 	lastVersion int64
 }
 
+// fakeTokenVerifier returns a canned claim set; tests inject the error they
+// want VerifyAccess to produce (expired/invalid/revoked).
+type fakeTokenVerifier struct {
+	mu     sync.Mutex
+	claims *domain.AccessClaims
+	verErr error
+}
+
+func (f *fakeTokenVerifier) set(claims *domain.AccessClaims, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claims, f.verErr = claims, err
+}
+
+func (f *fakeTokenVerifier) VerifyAccess(_ string) (*domain.AccessClaims, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.verErr != nil {
+		return nil, f.verErr
+	}
+	if f.claims == nil {
+		return &domain.AccessClaims{UserID: 1001, SessionID: 7001, DeviceID: "d-abc", TokenVersion: 0}, nil
+	}
+	return f.claims, nil
+}
+
 func (f *fakeTokenIssuer) IssuePair(_ context.Context, sessionID, userID int64, deviceID string, tokenVersion int64, now time.Time) (domain.TokenPair, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -808,6 +843,7 @@ type harness struct {
 	begin    *fakeBeginner
 	ids      *fakeIDGen
 	tokens   *fakeTokenIssuer
+	verifier *fakeTokenVerifier
 	throttle *fakeThrottle
 	audit    *fakeAudit
 	authToks *fakeAuthTokenRepo
@@ -833,6 +869,7 @@ func newHarness(t *testing.T) *harness {
 		hist:     &fakeLoginHistoryRepo{},
 		risk:     &fakeRisk{},
 		notifier: &fakeNotifier{},
+		verifier: &fakeTokenVerifier{},
 	}
 	h.begin = &fakeBeginner{}
 	h.svc = New(Deps{
@@ -854,6 +891,7 @@ func newHarness(t *testing.T) *harness {
 		LoginHistory:               h.hist,
 		Risk:                       h.risk,
 		Notifier:                   h.notifier,
+		Verifier:                   h.verifier,
 		PasswordResetTokenTTL:      30 * time.Minute,
 		ChangeVerificationTokenTTL: 15 * time.Minute,
 		DeletionGracePeriod:        30 * 24 * time.Hour,

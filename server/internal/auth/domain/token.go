@@ -11,6 +11,22 @@ import (
 // TokenPurpose is the purpose of a single-use recovery/verification token.
 type TokenPurpose string
 
+// AccessClaims is the validated claim set of an access JWT (JWT-5). The id
+// fields are 64-bit snowflake ids; the token itself serializes sub as a string
+// (API.md §2.2). The ver claim is the account's global token version at
+// issuance — gateways compare it against users.token_version (SESS-6).
+type AccessClaims struct {
+	UserID    int64
+	SessionID int64
+	DeviceID  string
+	Scopes    []string
+	JTI       string
+	// TokenVersion is the ver claim — the user's global token version at
+	// issuance.
+	TokenVersion int64
+	ExpiresAt    time.Time
+}
+
 const (
 	// PurposePasswordReset marks a forgot-password recovery token (REC-1:
 	// identifier verification).

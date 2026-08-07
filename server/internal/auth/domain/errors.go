@@ -46,6 +46,22 @@ var (
 	// ErrAccountRestoreExpired means the deletion grace window has passed and
 	// the account can no longer be restored (DATABASE.md §4.1 retention).
 	ErrAccountRestoreExpired = errors.New("auth: account restore window expired")
+	// ErrAccountDeleted means the account is soft-deleted and its tokens are
+	// rejected at the gateway (API.md Appendix A → 403 ACCOUNT_DELETED).
+	ErrAccountDeleted = errors.New("auth: account deleted")
+	// ErrTokenExpired means the access token passed its exp claim (API.md
+	// Appendix A → 401 TOKEN_EXPIRED, retryable via refresh).
+	ErrTokenExpired = errors.New("auth: access token expired")
+	// ErrTokenInvalid means the access token is malformed, tampered, or signed
+	// by the wrong key (→ 401 UNAUTHORIZED).
+	ErrTokenInvalid = errors.New("auth: access token invalid")
+	// ErrTokenRevoked means the token's ver claim is older than the account's
+	// current token version — a sign-out-everywhere invalidated it (SESS-6,
+	// JWT-5 → 401 TOKEN_REVOKED).
+	ErrTokenRevoked = errors.New("auth: access token revoked")
+	// ErrSessionRevoked means the token's session is no longer active (revoked,
+	// expired, or suspended → 401 SESSION_REVOKED).
+	ErrSessionRevoked = errors.New("auth: session revoked")
 )
 
 // AccountLockedError reports an active lockout (SECURITY_SPEC.md AUTH-5 →

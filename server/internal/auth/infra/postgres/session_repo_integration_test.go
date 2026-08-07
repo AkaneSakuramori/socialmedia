@@ -20,19 +20,22 @@ import (
 // These tests exercise the real PostgreSQL session repository (DATABASE.md
 // §4.4) against a live database (the dev compose stack). Run with:
 //
-//	go test -tags integration ./internal/auth/infra/postgres/
+//	APP_PG_DSN=$(grep APP_DB_PASSWORD ../infra/docker/.env | ...) go test -tags integration ./internal/auth/infra/postgres/
+//	# or simply: make test-integration
 //
-// They skip when PostgreSQL is unreachable. A users row is seeded because
-// user_sessions.user_id references users(id).
+// APP_PG_DSN is required: the credential is injected at run time and never
+// committed (DEVOPS.md §7). They skip when the database is unreachable.
 
 var integSeq int64
 
 // TestMain wipes disposable integration rows from a previously killed run so
-// reruns can never collide on the deterministic seed ids.
+// reruns can never collide on the deterministic seed ids. It runs only when
+// APP_PG_DSN is set; otherwise the package skips.
 func TestMain(m *testing.M) {
 	dsn := os.Getenv("APP_PG_DSN")
 	if dsn == "" {
-		dsn = "postgres://app:app_password@localhost:5432/inchat?sslmode=disable"
+		fmt.Fprintln(os.Stderr, "APP_PG_DSN not set; skipping auth integration tests")
+		os.Exit(0)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -52,7 +55,7 @@ func integPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("APP_PG_DSN")
 	if dsn == "" {
-		dsn = "postgres://app:app_password@localhost:5432/inchat?sslmode=disable"
+		t.Skip("APP_PG_DSN not set; skipping auth integration tests")
 	}
 	p, err := platformpg.Open(context.Background(), dsn, 4)
 	if err != nil {

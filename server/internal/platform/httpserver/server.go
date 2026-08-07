@@ -15,13 +15,18 @@ import (
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/observability"
 )
 
-// New assembles the HTTP server with its middleware chain and the two health
-// probes. Middleware order (outermost first): access log, panic recovery,
-// request-id — so every log line and every response header is correlated.
-func New(cfg config.Config, log *slog.Logger, liveness, readiness http.Handler) *http.Server {
+// New assembles the HTTP server with its middleware chain, the two health
+// probes, and the domain routes provided by the composition root. Middleware
+// order (outermost first): access log, panic recovery, request-id — so every
+// log line and every response header is correlated. extra may be nil; it is
+// mounted under its own paths (domain handlers register their routes).
+func New(cfg config.Config, log *slog.Logger, liveness, readiness http.Handler, extra http.Handler) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", liveness)
 	mux.Handle("GET /readyz", readiness)
+	if extra != nil {
+		mux.Handle("/", extra)
+	}
 	mux.HandleFunc("/", notFound)
 
 	var h http.Handler = mux
