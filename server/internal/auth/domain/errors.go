@@ -33,6 +33,19 @@ var (
 	// A caller may only administer its own sessions (SECURITY_SPEC.md SESS-3,
 	// API.md §4.8 → 403 NOT_SESSION_OWNER).
 	ErrSessionNotOwned = errors.New("auth: session belongs to another user")
+	// ErrRecoveryTokenInvalid means a recovery/verification token is malformed,
+	// unknown, expired, already used, or for the wrong purpose (REC-6 → 400/410).
+	ErrRecoveryTokenInvalid = errors.New("auth: recovery token invalid")
+	// ErrStepUpRequired means the risk hook escalated the authentication and a
+	// re-confirmation is required before the session is usable (AUTH-9/AUTH-11
+	// → 403 STEP_UP_REQUIRED).
+	ErrStepUpRequired = errors.New("auth: step-up re-confirmation required")
+	// ErrAccountAlreadyDeleted means deletion was already requested (API.md §5.5
+	// → 409 already scheduled).
+	ErrAccountAlreadyDeleted = errors.New("auth: account already deleted")
+	// ErrAccountRestoreExpired means the deletion grace window has passed and
+	// the account can no longer be restored (DATABASE.md §4.1 retention).
+	ErrAccountRestoreExpired = errors.New("auth: account restore window expired")
 )
 
 // AccountLockedError reports an active lockout (SECURITY_SPEC.md AUTH-5 →

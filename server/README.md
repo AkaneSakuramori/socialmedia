@@ -5,11 +5,12 @@ The InChat backend is a **modular monolith** (Go 1.24) following the finalized
 `ARCHITECTURE.md` and `API.md` the contract, `ENGINEERING_RULES.md` the house law.
 
 > **Status:** Sprint 1 — registration, login (password + OTP, AUTH-5 lockout),
-> refresh-token rotation with reuse detection (REFR-4/5, API.md §4.4), and
-> device/session management with logout (API.md §4.5–§4.8, SESS-3/SESS-6)
-> landed. Sessions, tokens, and the lockout store are in; the session
-> administration (list/rename/revoke/logout) use-cases are implemented; delivery
-> wiring is next.
+> refresh-token rotation with reuse detection (REFR-4/5, API.md §4.4),
+> device/session management with logout (API.md §4.5–§4.8, SESS-3/SESS-6), and
+> account security & recovery (milestone 5: forgot/reset/change password,
+> verified email/phone change, soft delete + grace-window restore, purge
+> worker, login history, risk-based escalation hook, audit log, best-effort
+> security notifications) landed. Delivery wiring is next.
 
 ## Stack
 
@@ -80,6 +81,9 @@ validated, and never passed through call stacks — consumers get concrete value
 | `APP_LOGIN_LOCKOUT_DURATION` | `5m` | Lockout window (AUTH-5) |
 | `APP_SESSION_IDLE_TIMEOUT` | `720h` | Sliding session-idle expiry, must be ≤ `APP_REFRESH_TTL` (SESS-9) |
 | `APP_SESSION_RETENTION` | `2160h` | Revoked/expired session rows kept before purge (DATABASE.md §4.4) |
+| `APP_PASSWORD_RESET_TOKEN_TTL` | `30m` | Password-reset token lifetime (REC-6) |
+| `APP_CHANGE_VERIFICATION_TOKEN_TTL` | `15m` | Email/phone-change verification token lifetime (REC-6) |
+| `APP_DELETION_GRACE_PERIOD` | `720h` | Soft-deleted account restore window before hard purge (API.md §5.5) |
 | `APP_IDGEN_NODE_ID` | `0` | Snowflake node id (0–1023) |
 
 Copy `server/.env.example` → `server/.env.local` for local overrides; `dev.sh`
@@ -98,12 +102,17 @@ Ed25519 JWT + opaque refresh-token factory, per-identifier login lockout over
 Redis, single-use refresh rotation with reuse detection and atomic CAS,
 session/credential repositories, session listing/rename/revoke/logout with
 idle-expiry and retention purge, `users`/`user_credentials`/`user_sessions`
-schema). The HTTP endpoints
+schema) plus the account-security use-cases and repositories
+(forgot/reset/change password, verified email/phone change, soft delete +
+grace-window restore + purge worker, login history, risk-based escalation
+hook, best-effort audit log and security notifications,
+`auth_tokens`/`login_history`/`audit_logs` schema). The HTTP endpoints
 (`POST /v1/auth/register`, `POST /v1/auth/login`, `POST /v1/auth/refresh`,
 `POST /v1/auth/logout`, `GET /v1/auth/devices`,
-`DELETE /v1/auth/devices/:id`, …) arrive in the delivery milestone of Sprint 1
-— until then the contract is exercised through `internal/auth/application`
-tests and build-tagged integration tests
+`DELETE /v1/auth/devices/:id`,
+`POST /v1/auth/otp/send`, `POST /v1/auth/password/reset`, …) arrive in the
+delivery milestone of Sprint 1 — until then the contract is exercised through
+`internal/auth/application` tests and build-tagged integration tests
 (`go test -tags integration ./internal/auth/infra/postgres/`, which need the
 dev PostgreSQL from `make dev-up`).
 

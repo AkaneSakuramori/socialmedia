@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -43,7 +44,7 @@ func (f *fakeTx) Rollback(context.Context) error {
 	return nil
 }
 func (f *fakeTx) Exec(context.Context, string, ...any) (int64, error) { return 0, nil }
-func (f *fakeTx) QueryRow(context.Context, string, ...any) tx.Row      { return nil }
+func (f *fakeTx) QueryRow(context.Context, string, ...any) tx.Row     { return nil }
 func (f *fakeTx) Query(context.Context, string, ...any) (tx.Rows, error) {
 	return nil, nil
 }
@@ -82,7 +83,10 @@ type fakeUserRepo struct {
 	byEmail    map[string]*userdomain.User
 	byUsername map[string]*userdomain.User
 	byID       map[int64]*userdomain.User
-	createErr  error
+	// deletedAt records the soft-delete timestamp per id (the domain User has
+	// no DeletedAt field; the real repo keeps it in SQL only).
+	deletedAt map[int64]time.Time
+	createErr error
 }
 
 func newFakeUserRepo() *fakeUserRepo {
@@ -91,6 +95,7 @@ func newFakeUserRepo() *fakeUserRepo {
 		byEmail:    map[string]*userdomain.User{},
 		byUsername: map[string]*userdomain.User{},
 		byID:       map[int64]*userdomain.User{},
+		deletedAt:  map[int64]time.Time{},
 	}
 }
 
@@ -117,28 +122,141 @@ func (r *fakeUserRepo) FindByID(_ context.Context, id int64) (*userdomain.User, 
 	return nil, userdomain.ErrUserNotFound
 }
 func (r *fakeUserRepo) FindByPhone(_ context.Context, p string) (*userdomain.User, error) {
-	if u, ok := r.byPhone[p]; ok {
+	if u, ok := r.byPhone[p]; ok && u.AccountState != userdomain.AccountDeleted {
 		return u, nil
 	}
 	return nil, userdomain.ErrUserNotFound
 }
 func (r *fakeUserRepo) FindByEmail(_ context.Context, e string) (*userdomain.User, error) {
-	if u, ok := r.byEmail[e]; ok {
+	if u, ok := r.byEmail[e]; ok && u.AccountState != userdomain.AccountDeleted {
 		return u, nil
 	}
 	return nil, userdomain.ErrUserNotFound
 }
 func (r *fakeUserRepo) PhoneTaken(_ context.Context, p string) (bool, error) {
-	_, ok := r.byPhone[p]
-	return ok, nil
+	u, ok := r.byPhone[p]
+	return ok && u.AccountState != userdomain.AccountDeleted, nil
 }
 func (r *fakeUserRepo) EmailTaken(_ context.Context, e string) (bool, error) {
-	_, ok := r.byEmail[e]
-	return ok, nil
+	u, ok := r.byEmail[e]
+	return ok && u.AccountState != userdomain.AccountDeleted, nil
 }
 func (r *fakeUserRepo) UsernameTaken(_ context.Context, u string) (bool, error) {
-	_, ok := r.byUsername[u]
-	return ok, nil
+	uu, ok := r.byUsername[u]
+	return ok && uu.AccountState != userdomain.AccountDeleted, nil
+}
+
+// SetEmail assigns a verified email, returning ErrIdentifierTaken when another
+// non-deleted account already holds it (the unique index is the arbiter).
+func (r *fakeUserRepo) SetEmail(_ context.Context, _ tx.Tx, userID int64, email string) error {
+	u, ok := r.byID[userID]
+	if !ok {
+		return userdomain.ErrUserNotFound
+	}
+	for id, other := range r.byID {
+		if id != userID && other.Email != nil && *other.Email == email && other.AccountState != userdomain.AccountDeleted {
+			return userdomain.ErrIdentifierTaken
+		}
+	}
+	if u.Email != nil {
+		delete(r.byEmail, *u.Email)
+	}
+	u.Email = &email
+	r.byEmail[email] = u
+	return nil
+}
+
+// SetPhone assigns a verified phone, returning ErrIdentifierTaken when claimed.
+func (r *fakeUserRepo) SetPhone(_ context.Context, _ tx.Tx, userID int64, phone string) error {
+	u, ok := r.byID[userID]
+	if !ok {
+		return userdomain.ErrUserNotFound
+	}
+	for id, other := range r.byID {
+		if id != userID && other.PhoneNumber != nil && *other.PhoneNumber == phone && other.AccountState != userdomain.AccountDeleted {
+			return userdomain.ErrIdentifierTaken
+		}
+	}
+	if u.PhoneNumber != nil {
+		delete(r.byPhone, *u.PhoneNumber)
+	}
+	u.PhoneNumber = &phone
+	r.byPhone[phone] = u
+	return nil
+}
+
+// MarkDeleted soft-deletes the account; a second call returns
+// ErrAccountAlreadyDeleted.
+func (r *fakeUserRepo) MarkDeleted(_ context.Context, _ tx.Tx, userID int64, deletedAt time.Time) error {
+	u, ok := r.byID[userID]
+	if !ok {
+		return userdomain.ErrUserNotFound
+	}
+	if u.AccountState == userdomain.AccountDeleted {
+		return userdomain.ErrAccountAlreadyDeleted
+	}
+	u.AccountState = userdomain.AccountDeleted
+	r.deletedAt[userID] = deletedAt
+	return nil
+}
+
+// Restore reactivates a deleted account whose deleted_at is within the grace
+// window (deletedAt >= graceCutoff).
+func (r *fakeUserRepo) Restore(_ context.Context, _ tx.Tx, userID int64, graceCutoff time.Time) error {
+	u, ok := r.byID[userID]
+	if !ok {
+		return userdomain.ErrUserNotFound
+	}
+	deletedAt, deleted := r.deletedAt[userID]
+	if !deleted || deletedAt.Before(graceCutoff) {
+		return userdomain.ErrAccountRestoreExpired
+	}
+	u.AccountState = userdomain.AccountActive
+	delete(r.deletedAt, userID)
+	return nil
+}
+
+// FindDeletedByPhone loads a soft-deleted account by phone (recovery lookup).
+func (r *fakeUserRepo) FindDeletedByPhone(_ context.Context, phone string) (*userdomain.User, error) {
+	for _, u := range r.byID {
+		if u.AccountState == userdomain.AccountDeleted && u.PhoneNumber != nil && *u.PhoneNumber == phone {
+			return u, nil
+		}
+	}
+	return nil, userdomain.ErrUserNotFound
+}
+
+// FindDeletedByEmail loads a soft-deleted account by email (recovery lookup).
+func (r *fakeUserRepo) FindDeletedByEmail(_ context.Context, email string) (*userdomain.User, error) {
+	for _, u := range r.byID {
+		if u.AccountState == userdomain.AccountDeleted && u.Email != nil && *u.Email == email {
+			return u, nil
+		}
+	}
+	return nil, userdomain.ErrUserNotFound
+}
+
+// PurgeDeleted hard-deletes accounts deleted before the cutoff.
+func (r *fakeUserRepo) PurgeDeleted(_ context.Context, cutoff time.Time) (int64, error) {
+	var n int64
+	for id, u := range r.byID {
+		deletedAt, deleted := r.deletedAt[id]
+		if deleted && deletedAt.Before(cutoff) {
+			delete(r.byID, id)
+			delete(r.deletedAt, id)
+			if u.PhoneNumber != nil {
+				delete(r.byPhone, *u.PhoneNumber)
+			}
+			if u.Email != nil {
+				delete(r.byEmail, *u.Email)
+			}
+			if u.Username != nil {
+				delete(r.byUsername, *u.Username)
+			}
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (r *fakeUserRepo) BumpTokenVersion(_ context.Context, dbtx tx.Tx, userID int64) (int64, error) {
@@ -174,6 +292,32 @@ func (r *fakeCredRepo) FindPassword(_ context.Context, userID int64) (*domain.Cr
 		}
 	}
 	return nil, userdomain.ErrUserNotFound
+}
+
+// ReplacePassword atomically replaces the user's password hash in place.
+func (r *fakeCredRepo) ReplacePassword(_ context.Context, _ tx.Tx, userID int64, hash domain.PasswordHash) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.creds {
+		if c.UserID == userID && c.Method == domain.MethodPassword {
+			data, err := json.Marshal(domain.PasswordCredentialData{Hash: hash.String()})
+			if err != nil {
+				return err
+			}
+			c.Data = data
+			return nil
+		}
+	}
+	data, err := json.Marshal(domain.PasswordCredentialData{Hash: hash.String()})
+	if err != nil {
+		return err
+	}
+	r.creds = append(r.creds, &domain.Credential{
+		UserID: userID,
+		Method: domain.MethodPassword,
+		Data:   data,
+	})
+	return nil
 }
 
 type fakeSessionRepo struct {
@@ -316,6 +460,28 @@ func (r *fakeSessionRepo) RevokeOthersByUserID(_ context.Context, _ tx.Tx, userI
 	for _, s := range r.sessions {
 		if s.UserID == userID && s.ID != keepSessionID && s.State != domain.SessionRevoked {
 			s.State = domain.SessionRevoked
+		}
+	}
+	return nil
+}
+
+func (r *fakeSessionRepo) SuspendOthersByUserID(_ context.Context, _ tx.Tx, userID, keepSessionID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		if s.UserID == userID && s.ID != keepSessionID && s.State == domain.SessionActive {
+			s.State = domain.SessionSuspended
+		}
+	}
+	return nil
+}
+
+func (r *fakeSessionRepo) SuspendAllByUserID(_ context.Context, _ tx.Tx, userID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		if s.UserID == userID && s.State == domain.SessionActive {
+			s.State = domain.SessionSuspended
 		}
 	}
 	return nil
@@ -500,6 +666,137 @@ func (a *fakeAudit) actions() []string {
 	return out
 }
 
+// fakeAuthTokenRepo stores single-use recovery/verification tokens by hash.
+// Consume is atomic in-memory: a token is usable exactly once and TTL-bounded.
+type fakeAuthTokenRepo struct {
+	mu     sync.Mutex
+	tokens map[string]*domain.AuthToken
+	nextID int64
+}
+
+func newFakeAuthTokenRepo() *fakeAuthTokenRepo {
+	return &fakeAuthTokenRepo{tokens: map[string]*domain.AuthToken{}}
+}
+
+func (r *fakeAuthTokenRepo) Create(_ context.Context, _ tx.Tx, t *domain.AuthToken) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nextID++
+	c := *t
+	c.ID = r.nextID
+	r.tokens[t.TokenHash] = &c
+	return nil
+}
+
+func (r *fakeAuthTokenRepo) Consume(_ context.Context, _ tx.Tx, tokenHash string) (*domain.AuthToken, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tokens[tokenHash]
+	if !ok {
+		return nil, domain.ErrRecoveryTokenInvalid
+	}
+	if t.UsedAt != nil || !time.Now().Before(t.ExpiresAt) {
+		return nil, domain.ErrRecoveryTokenInvalid
+	}
+	now := time.Now()
+	t.UsedAt = &now
+	c := *t
+	return &c, nil
+}
+
+// tokensByUser returns copies of all stored tokens for a user.
+func (r *fakeAuthTokenRepo) tokensByUser(userID int64) []domain.AuthToken {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []domain.AuthToken
+	for _, t := range r.tokens {
+		if t.UserID == userID {
+			out = append(out, *t)
+		}
+	}
+	return out
+}
+
+// fakeLoginHistoryRepo stores login events for the history screen.
+type fakeLoginHistoryRepo struct {
+	mu     sync.Mutex
+	events []domain.LoginEvent
+}
+
+func (r *fakeLoginHistoryRepo) Record(_ context.Context, e domain.LoginEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, e)
+	return nil
+}
+
+func (r *fakeLoginHistoryRepo) ListByUser(_ context.Context, userID int64, limit int) ([]domain.LoginEvent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []domain.LoginEvent
+	for _, e := range r.events {
+		if e.UserID != nil && *e.UserID == userID {
+			out = append(out, e)
+		}
+	}
+	// newest first
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j].CreatedAt.After(out[j-1].CreatedAt); j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (r *fakeLoginHistoryRepo) all() []domain.LoginEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]domain.LoginEvent, len(r.events))
+	copy(out, r.events)
+	return out
+}
+
+// fakeRisk is a scripted RiskEvaluator for the AUTH-11 hook.
+type fakeRisk struct {
+	decision domain.RiskDecision
+	err      error
+	// lastContext records the most recent evaluation input.
+	lastContext domain.RiskContext
+}
+
+func (f *fakeRisk) Evaluate(_ context.Context, rc domain.RiskContext) (domain.RiskDecision, error) {
+	f.lastContext = rc
+	return f.decision, f.err
+}
+
+// fakeNotifier records security notifications for the account holder.
+type fakeNotifier struct {
+	mu          sync.Mutex
+	notified    []string // event names, in order
+	notifyError error
+}
+
+func (f *fakeNotifier) Notify(_ context.Context, _ int64, event string, _ map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.notifyError != nil {
+		return f.notifyError
+	}
+	f.notified = append(f.notified, event)
+	return nil
+}
+
+func (f *fakeNotifier) events() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.notified))
+	copy(out, f.notified)
+	return out
+}
+
 // ---- test harness ----
 
 type harness struct {
@@ -513,6 +810,10 @@ type harness struct {
 	tokens   *fakeTokenIssuer
 	throttle *fakeThrottle
 	audit    *fakeAudit
+	authToks *fakeAuthTokenRepo
+	hist     *fakeLoginHistoryRepo
+	risk     *fakeRisk
+	notifier *fakeNotifier
 	clk      clock.Clock
 }
 
@@ -528,23 +829,34 @@ func newHarness(t *testing.T) *harness {
 		tokens:   &fakeTokenIssuer{},
 		throttle: &fakeThrottle{counts: map[string]int{}, policy: domain.DefaultLoginPolicy()},
 		audit:    &fakeAudit{},
+		authToks: newFakeAuthTokenRepo(),
+		hist:     &fakeLoginHistoryRepo{},
+		risk:     &fakeRisk{},
+		notifier: &fakeNotifier{},
 	}
 	h.begin = &fakeBeginner{}
 	h.svc = New(Deps{
-		Users:              h.users,
-		Credentials:        h.creds,
-		Sessions:           h.sess,
-		Hasher:             fakeHasher{},
-		Tokens:             h.tokens,
-		OTP:                h.otp,
-		Throttle:           h.throttle,
-		Policy:             domain.DefaultLoginPolicy(),
-		Audit:              h.audit,
-		IDs:                h.ids,
-		TxBeginner:         h.begin,
-		Clock:              h.clk,
-		SessionIdleTimeout: 30 * 24 * time.Hour,
-		SessionRetention:   90 * 24 * time.Hour,
+		Users:                      h.users,
+		Credentials:                h.creds,
+		Sessions:                   h.sess,
+		Hasher:                     fakeHasher{},
+		Tokens:                     h.tokens,
+		OTP:                        h.otp,
+		Throttle:                   h.throttle,
+		Policy:                     domain.DefaultLoginPolicy(),
+		Audit:                      h.audit,
+		IDs:                        h.ids,
+		TxBeginner:                 h.begin,
+		Clock:                      h.clk,
+		SessionIdleTimeout:         30 * 24 * time.Hour,
+		SessionRetention:           90 * 24 * time.Hour,
+		AuthTokens:                 h.authToks,
+		LoginHistory:               h.hist,
+		Risk:                       h.risk,
+		Notifier:                   h.notifier,
+		PasswordResetTokenTTL:      30 * time.Minute,
+		ChangeVerificationTokenTTL: 15 * time.Minute,
+		DeletionGracePeriod:        30 * 24 * time.Hour,
 	})
 	return h
 }

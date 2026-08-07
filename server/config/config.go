@@ -72,6 +72,15 @@ type Config struct {
 	// SessionRetention is how long revoked/expired session rows are kept before
 	// purge (DATABASE.md §4.4 retention: 90 days).
 	SessionRetention time.Duration
+	// PasswordResetTokenTTL is how long a forgot-password recovery token stays
+	// valid (SECURITY_SPEC.md REC-6; short TTL bounds takeover windows).
+	PasswordResetTokenTTL time.Duration
+	// ChangeVerificationTokenTTL is how long an email/phone change verification
+	// token stays valid (AUTH-9 re-confirmation).
+	ChangeVerificationTokenTTL time.Duration
+	// DeletionGracePeriod is how long a soft-deleted account can be restored
+	// before the hard-purge worker removes it (API.md §5.5: 30-day grace).
+	DeletionGracePeriod time.Duration
 }
 
 // Defaults for local development. Deployed environments override via env vars.
@@ -98,6 +107,9 @@ const (
 	defaultLoginLockout     = 5 * time.Minute
 	defaultSessionIdle      = 30 * 24 * time.Hour
 	defaultSessionRetention = 90 * 24 * time.Hour
+	defaultResetTokenTTL    = 30 * time.Minute
+	defaultChangeTokenTTL   = 15 * time.Minute
+	defaultDeletionGrace    = 30 * 24 * time.Hour
 )
 
 // Load reads configuration from the environment, applies defaults, and
@@ -105,28 +117,31 @@ const (
 // misconfigured server fails fast before binding anything.
 func Load() (Config, error) {
 	cfg := Config{
-		AppEnv:               getEnv("APP_ENV", "dev"),
-		HTTPPort:             getEnv("APP_HTTP_PORT", defaultHTTPPort),
-		ReadHeaderTimeout:    getDuration("APP_HTTP_READ_HEADER_TIMEOUT", defaultReadHeaderTimeout),
-		ShutdownTimeout:      getDuration("APP_SHUTDOWN_TIMEOUT", defaultShutdownTimeout),
-		PGDSN:                os.Getenv("APP_PG_DSN"),
-		PGMaxConns:           int32(getInt("APP_PG_MAX_CONNS", defaultPGMaxConns)),
-		RedisAddr:            getEnv("APP_REDIS_ADDR", defaultRedisAddr),
-		RedisPassword:        os.Getenv("APP_REDIS_PASSWORD"),
-		RedisDB:              getInt("APP_REDIS_DB", defaultRedisDB),
-		JWTIssuer:            getEnv("APP_JWT_ISSUER", defaultJWTIssuer),
-		JWTAudience:          getEnv("APP_JWT_AUDIENCE", defaultJWTAudience),
-		JWTPrivateKey:        os.Getenv("APP_JWT_PRIVATE_KEY"),
-		AccessTokenTTL:       getDuration("APP_ACCESS_TOKEN_TTL", defaultAccessTokenTTL),
-		RefreshTokenTTL:      getDuration("APP_REFRESH_TOKEN_TTL", defaultRefreshTokenTTL),
-		Argon2Memory:         getInt("APP_ARGON2_MEMORY_KIB", defaultArgon2Memory),
-		Argon2Time:           getInt("APP_ARGON2_TIME", defaultArgon2Time),
-		Argon2Threads:        getInt("APP_ARGON2_THREADS", defaultArgon2Threads),
-		IDGenNodeID:          getInt("APP_IDGEN_NODE_ID", 0),
-		LoginMaxFailures:     getInt("APP_LOGIN_MAX_FAILURES", defaultLoginMaxFailures),
-		LoginLockoutDuration: getDuration("APP_LOGIN_LOCKOUT_DURATION", defaultLoginLockout),
-		SessionIdleTimeout:   getDuration("APP_SESSION_IDLE_TIMEOUT", defaultSessionIdle),
-		SessionRetention:     getDuration("APP_SESSION_RETENTION", defaultSessionRetention),
+		AppEnv:                     getEnv("APP_ENV", "dev"),
+		HTTPPort:                   getEnv("APP_HTTP_PORT", defaultHTTPPort),
+		ReadHeaderTimeout:          getDuration("APP_HTTP_READ_HEADER_TIMEOUT", defaultReadHeaderTimeout),
+		ShutdownTimeout:            getDuration("APP_SHUTDOWN_TIMEOUT", defaultShutdownTimeout),
+		PGDSN:                      os.Getenv("APP_PG_DSN"),
+		PGMaxConns:                 int32(getInt("APP_PG_MAX_CONNS", defaultPGMaxConns)),
+		RedisAddr:                  getEnv("APP_REDIS_ADDR", defaultRedisAddr),
+		RedisPassword:              os.Getenv("APP_REDIS_PASSWORD"),
+		RedisDB:                    getInt("APP_REDIS_DB", defaultRedisDB),
+		JWTIssuer:                  getEnv("APP_JWT_ISSUER", defaultJWTIssuer),
+		JWTAudience:                getEnv("APP_JWT_AUDIENCE", defaultJWTAudience),
+		JWTPrivateKey:              os.Getenv("APP_JWT_PRIVATE_KEY"),
+		AccessTokenTTL:             getDuration("APP_ACCESS_TOKEN_TTL", defaultAccessTokenTTL),
+		RefreshTokenTTL:            getDuration("APP_REFRESH_TOKEN_TTL", defaultRefreshTokenTTL),
+		Argon2Memory:               getInt("APP_ARGON2_MEMORY_KIB", defaultArgon2Memory),
+		Argon2Time:                 getInt("APP_ARGON2_TIME", defaultArgon2Time),
+		Argon2Threads:              getInt("APP_ARGON2_THREADS", defaultArgon2Threads),
+		IDGenNodeID:                getInt("APP_IDGEN_NODE_ID", 0),
+		LoginMaxFailures:           getInt("APP_LOGIN_MAX_FAILURES", defaultLoginMaxFailures),
+		LoginLockoutDuration:       getDuration("APP_LOGIN_LOCKOUT_DURATION", defaultLoginLockout),
+		SessionIdleTimeout:         getDuration("APP_SESSION_IDLE_TIMEOUT", defaultSessionIdle),
+		SessionRetention:           getDuration("APP_SESSION_RETENTION", defaultSessionRetention),
+		PasswordResetTokenTTL:      getDuration("APP_PASSWORD_RESET_TOKEN_TTL", defaultResetTokenTTL),
+		ChangeVerificationTokenTTL: getDuration("APP_CHANGE_VERIFICATION_TOKEN_TTL", defaultChangeTokenTTL),
+		DeletionGracePeriod:        getDuration("APP_DELETION_GRACE_PERIOD", defaultDeletionGrace),
 	}
 
 	// Local dev convenience: a default DSN matching the compose stack.
@@ -221,6 +236,15 @@ func (c Config) Validate() error {
 	if c.SessionRetention <= 0 {
 		errs = append(errs, "APP_SESSION_RETENTION must be > 0")
 	}
+	if c.PasswordResetTokenTTL <= 0 {
+		errs = append(errs, "APP_PASSWORD_RESET_TOKEN_TTL must be > 0")
+	}
+	if c.ChangeVerificationTokenTTL <= 0 {
+		errs = append(errs, "APP_CHANGE_VERIFICATION_TOKEN_TTL must be > 0")
+	}
+	if c.DeletionGracePeriod <= 0 {
+		errs = append(errs, "APP_DELETION_GRACE_PERIOD must be > 0")
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid configuration:\n  - %s", strings.Join(errs, "\n  - "))
@@ -247,13 +271,14 @@ func (c Config) String() string {
 		key = "xxxxx"
 	}
 	return fmt.Sprintf(
-		"{AppEnv:%s HTTPPort:%s ReadHeaderTimeout:%s ShutdownTimeout:%s PGDSN:%s PGMaxConns:%d RedisAddr:%s RedisPassword:%s RedisDB:%d JWTIssuer:%s JWTAudience:%s JWTPrivateKey:%s AccessTokenTTL:%s RefreshTokenTTL:%s Argon2:%d/%d/%d IDGenNodeID:%d LoginPolicy:%d/%s Sessions:%s/%s}",
+		"{AppEnv:%s HTTPPort:%s ReadHeaderTimeout:%s ShutdownTimeout:%s PGDSN:%s PGMaxConns:%d RedisAddr:%s RedisPassword:%s RedisDB:%d JWTIssuer:%s JWTAudience:%s JWTPrivateKey:%s AccessTokenTTL:%s RefreshTokenTTL:%s Argon2:%d/%d/%d IDGenNodeID:%d LoginPolicy:%d/%s Sessions:%s/%s Recovery:%s/%s/%s}",
 		c.AppEnv, c.HTTPPort, c.ReadHeaderTimeout, c.ShutdownTimeout,
 		dsn, c.PGMaxConns, c.RedisAddr, pass, c.RedisDB,
 		c.JWTIssuer, c.JWTAudience, key, c.AccessTokenTTL, c.RefreshTokenTTL,
 		c.Argon2Memory, c.Argon2Time, c.Argon2Threads, c.IDGenNodeID,
 		c.LoginMaxFailures, c.LoginLockoutDuration,
 		c.SessionIdleTimeout, c.SessionRetention,
+		c.PasswordResetTokenTTL, c.ChangeVerificationTokenTTL, c.DeletionGracePeriod,
 	)
 }
 

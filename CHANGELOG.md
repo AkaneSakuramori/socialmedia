@@ -6,7 +6,83 @@ versioning follows [SemVer](https://semver.org/). Newest entries appear first.
 
 ## [Unreleased]
 
-### Sprint 1 — Authentication & Identity (milestone 4: device management, session administration & logout)
+### Sprint 1 — Authentication & Identity (milestone 5: account security, recovery & production hardening)
+
+#### Added
+- **`server/migrations/000005_account_security`** — `auth_tokens` (single-use
+  recovery/verification tokens: purpose CHECK, hashed token, JSONB data,
+  expires_at/used_at; REC-6), `login_history` (per-login security-review trail;
+  unknown-identifier failures carry a NULL user_id, MON-5) and `audit_logs`
+  (immutable trail per DATABASE.md §8.5, AUTH-7/AUD-1) with their indexes;
+  matching `down.sql`.
+- **`server/internal/auth/application/account_security_flows.go`** — the
+  account-security use-cases: `RequestPasswordReset` (forgot password; uniform
+  response for known/unknown/deleted/suspended identifiers so the endpoint does
+  not enumerate accounts, OWASP A07), `ResetPassword` (single-use token →
+  new password, suspend every session and bump `token_version`; REC-1/4,
+  PASS-4, SESS-4), `ChangePassword` (step-up re-auth AUTH-9, keeps the current
+  session, suspends all others), `Request/ConfirmEmailChange` and
+  `Request/ConfirmPhoneChange` (step-up + uniqueness check, verification token
+  bound to the pending identifier, unique index arbitrates races),
+  `DeleteAccount` (step-up, soft delete + session revocation + token bump,
+  API.md §5.5), `RestoreAccount` (OTP-gated within the grace window, REC-1),
+  `PurgeDeletedAccounts` (retention worker, DATABASE.md §4.1) and
+  `ListLoginHistory` (own events only, newest first). Audit events
+  `auth.password_reset_requested`/`auth.password_reset`/
+  `auth.password_changed`/`auth.email_change_requested`/`auth.email_changed`/
+  `auth.phone_change_requested`/`auth.phone_changed`/`account.deleted`/
+  `account.restored`; best-effort security notifications (password change,
+  new-device login, identifier change, account deletion).
+- **`server/internal/auth/domain`** — `AuthToken` + `AuthTokenRepository`
+  (Create/Consume; Consume is one atomic UPDATE, single-use and TTL-bounded,
+  all invalid states reported identically as `ErrRecoveryTokenInvalid`),
+  `GenerateOpaqueToken` (256-bit base64url, stored only as SHA-256 — the REFR-2
+  pattern), `LoginEvent` + `LoginHistoryRepository` (best-effort writes),
+  `RiskEvaluator`/`RiskDecision` (AUTH-11 risk-based escalation hook;
+  `PermissiveRisk` default), `SecurityNotifier` (`NoopNotifier` default),
+  `SessionRepository.SuspendOthersByUserID`/`SuspendAllByUserID`,
+  `CredentialRepository.ReplacePassword`, `AuditEvent.ResourceType`, and the
+  errors `ErrRecoveryTokenInvalid`, `ErrStepUpRequired`, `ErrAccountAlreadyDeleted`,
+  `ErrAccountRestoreExpired`.
+- **`server/internal/user/domain`** — `UserRepository.SetEmail`/`SetPhone`
+  (race-safe via the unique index → `ErrIdentifierTaken`), `MarkDeleted`
+  (soft delete), `Restore` (grace window), `FindDeletedByPhone`/`FindDeletedByEmail`
+  (recovery lookups) and `PurgeDeleted` (hard-deletes the account and its
+  dependent rows — credentials, sessions, recovery tokens — in one transaction).
+- **`server/internal/auth/infra/postgres`** — `UserRepo` lifecycle methods,
+  `AuthTokenRepo` (atomic `UPDATE … RETURNING` consume),
+  `LoginHistoryRepo` and the best-effort `AuditLog` adapter.
+- **`server/config`** — `APP_PASSWORD_RESET_TOKEN_TTL` (default 30m),
+  `APP_CHANGE_VERIFICATION_TOKEN_TTL` (default 15m) and
+  `APP_DELETION_GRACE_PERIOD` (default 30d), validated > 0.
+- **Login wiring (AUTH-11)** — `Login` now evaluates the risk hook
+  (new-device signal + IP/UA/method); a `StepUp` verdict returns
+  `ErrStepUpRequired` without creating a session, a `Notify` verdict surfaces
+  a new-device notification; every attempt records a `login_history` row and
+  the success/failure audit entries carry `new_device`.
+- **Tests** — ~24 application unit tests (reset no-enumeration + timing,
+  single-use + expired + wrong-purpose + malformed tokens, reset suspends all
+  sessions, change-password keeps current + suspends others + step-up,
+  email/phone change round-trips + taken/unchanged + token reuse, delete +
+  already-deleted + step-up, restore within grace + wrong OTP + expired grace,
+  purge, login history ownership/order, risk step-up blocks the session) and 6
+  new build-tagged integration tests against live PostgreSQL (SetPhone/SetEmail
+  + unique-index arbitration, MarkDeleted/Restore/PurgeDeleted + grace window,
+  token create/single-consume/uniform errors/expiry, login-history record+list,
+  audit persistence).
+
+#### Changed
+- `Service` exposes the milestone-5 use-cases; `Deps` gained `AuthTokens`,
+  `LoginHistory`, `Risk`, `Notifier` and the three recovery TTL/grace durations.
+- `ValidatePassword` no longer reports `contains_identifier` when no identifier
+  context exists (password change/reset have no identifier to compare against).
+- Integration test seeding now also wipes `auth_tokens`/`login_history`/
+  `audit_logs` leftovers so killed runs never break a rerun.
+
+#### Verified
+- Migration `000005_account_security` applied; `auth_tokens`, `login_history`
+  and `audit_logs` verified in PostgreSQL. `make ci` green including the
+  integration tests against the dev stack.
 
 #### Added
 - **`server/migrations/000004_sessions`** — `users.token_version` (global

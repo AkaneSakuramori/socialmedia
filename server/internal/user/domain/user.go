@@ -71,4 +71,28 @@ type UserRepository interface {
 	// version and returns the new value (SESS-6: sign-out-everywhere). Callers
 	// do this in the same transaction that revokes the sessions.
 	BumpTokenVersion(ctx context.Context, dbtx tx.Tx, userID int64) (int64, error)
+	// SetEmail atomically assigns a verified email to the account, returning
+	// ErrIdentifierTaken when the value is already claimed by another account
+	// (race-safe: the unique index is the final arbiter). Mirrors SetPhone.
+	SetEmail(ctx context.Context, dbtx tx.Tx, userID int64, email string) error
+	// SetPhone atomically assigns a verified E.164 phone to the account,
+	// returning ErrIdentifierTaken on a concurrent claim.
+	SetPhone(ctx context.Context, dbtx tx.Tx, userID int64, phone string) error
+	// MarkDeleted soft-deletes the account (API.md §5.5: account_state='deleted'
+	// + deleted_at), returning ErrAccountAlreadyDeleted when already deleted.
+	MarkDeleted(ctx context.Context, dbtx tx.Tx, userID int64, deletedAt time.Time) error
+	// Restore reactivates a deleted account whose deleted_at falls within the
+	// grace window (deleted_at >= cutoff). Returns ErrAccountRestoreExpired
+	// when the window has passed or the account is not deleted.
+	Restore(ctx context.Context, dbtx tx.Tx, userID int64, graceCutoff time.Time) error
+	// FindDeletedByPhone loads a deleted account by normalized E.164 phone
+	// (account-recovery lookup), or ErrUserNotFound.
+	FindDeletedByPhone(ctx context.Context, phone string) (*User, error)
+	// FindDeletedByEmail loads a deleted account by normalized email, or
+	// ErrUserNotFound.
+	FindDeletedByEmail(ctx context.Context, email string) (*User, error)
+	// PurgeDeleted hard-deletes accounts deleted before the cutoff and their
+	// dependent rows (DATABASE.md §4.1 retention: soft delete → purge worker).
+	// It returns the number of accounts removed.
+	PurgeDeleted(ctx context.Context, cutoff time.Time) (int64, error)
 }

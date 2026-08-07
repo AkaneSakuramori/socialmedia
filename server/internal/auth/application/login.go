@@ -63,6 +63,7 @@ func (s *service) Login(ctx context.Context, cmd LoginCommand) (*LoginResult, er
 		}
 		s.audit(ctx, nil, "auth.login_failed", nil, cmd.IPAddress,
 			map[string]string{"identifier": key, "method": string(cmd.Method)})
+		s.recordLogin(ctx, nil, key, cmd.Method, false, false, cmd.Device.DeviceID, cmd.IPAddress, cmd.UserAgent)
 		return nil, domain.ErrInvalidCredentials
 	}
 
@@ -80,6 +81,7 @@ func (s *service) Login(ctx context.Context, cmd LoginCommand) (*LoginResult, er
 		}
 		s.audit(ctx, nil, "auth.login_failed", nil, cmd.IPAddress,
 			map[string]string{"identifier": key, "method": string(cmd.Method)})
+		s.recordLogin(ctx, nil, key, cmd.Method, false, false, cmd.Device.DeviceID, cmd.IPAddress, cmd.UserAgent)
 		return nil, domain.ErrInvalidCredentials
 	}
 
@@ -93,6 +95,7 @@ func (s *service) Login(ctx context.Context, cmd LoginCommand) (*LoginResult, er
 		}
 		s.audit(ctx, &user.ID, "auth.login_failed", &user.ID, cmd.IPAddress,
 			map[string]string{"method": string(cmd.Method)})
+		s.recordLogin(ctx, &user.ID, key, cmd.Method, false, false, cmd.Device.DeviceID, cmd.IPAddress, cmd.UserAgent)
 		return nil, domain.ErrInvalidCredentials
 	}
 
@@ -101,15 +104,57 @@ func (s *service) Login(ctx context.Context, cmd LoginCommand) (*LoginResult, er
 		return nil, fmt.Errorf("auth: clear lockout: %w", err)
 	}
 
+	// AUTH-11 risk-based validation hook: detect new-device logins and escalate
+	// or notify. The default evaluator is permissive; richer scoring plugs here.
+	newDevice := s.isNewDevice(ctx, user.ID, cmd.Device.DeviceID)
+	if s.deps.Risk != nil {
+		decision, err := s.deps.Risk.Evaluate(ctx, domain.RiskContext{
+			UserID:    user.ID,
+			NewDevice: newDevice,
+			DeviceID:  cmd.Device.DeviceID,
+			IPAddress: cmd.IPAddress,
+			UserAgent: cmd.UserAgent,
+			Method:    cmd.Method,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("auth: risk evaluation: %w", err)
+		}
+		if decision.StepUp {
+			s.recordLogin(ctx, &user.ID, key, cmd.Method, true, newDevice, cmd.Device.DeviceID, cmd.IPAddress, cmd.UserAgent)
+			s.audit(ctx, &user.ID, "auth.login_step_up", &user.ID, cmd.IPAddress,
+				map[string]string{"device_id": cmd.Device.DeviceID, "new_device": boolStr(newDevice)})
+			return nil, domain.ErrStepUpRequired
+		}
+		if decision.Notify {
+			s.notify(ctx, user.ID, "login_new_device",
+				map[string]string{"device_id": cmd.Device.DeviceID})
+		}
+	}
+
 	now := s.now()
 	session, pair, err := s.upsertSession(ctx, user.ID, cmd.Device, cmd.IPAddress, cmd.UserAgent, now, user.TokenVersion)
 	if err != nil {
 		return nil, err
 	}
 
+	s.recordLogin(ctx, &user.ID, key, cmd.Method, true, newDevice, cmd.Device.DeviceID, cmd.IPAddress, cmd.UserAgent)
 	s.audit(ctx, &user.ID, "auth.login", &user.ID, cmd.IPAddress,
-		map[string]string{"method": string(cmd.Method), "device_id": cmd.Device.DeviceID})
+		map[string]string{"method": string(cmd.Method), "device_id": cmd.Device.DeviceID, "new_device": boolStr(newDevice)})
 	return &LoginResult{User: *user, Session: *session, TokenPair: pair}, nil
+}
+
+// isNewDevice reports whether this device has an existing session for the user
+// (AUTH-11: new-device signal for risk-based escalation).
+func (s *service) isNewDevice(ctx context.Context, userID int64, deviceID string) bool {
+	_, err := s.deps.Sessions.FindByDeviceID(ctx, userID, deviceID)
+	return errors.Is(err, domain.ErrSessionNotFound)
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 // findUser maps an identifier to the account lookup.
@@ -257,10 +302,30 @@ func (s *service) audit(ctx context.Context, userID *int64, action string, resou
 		return
 	}
 	_ = s.deps.Audit.Log(ctx, domain.AuditEvent{
-		ActorUserID: userID,
-		Action:      action,
-		ResourceID:  resourceID,
-		IPAddress:   ip,
-		Details:     details,
+		ActorUserID:  userID,
+		Action:       action,
+		ResourceID:   resourceID,
+		IPAddress:    ip,
+		Details:      details,
+		ResourceType: "user",
+	})
+}
+
+// recordLogin appends a login-history entry. Best-effort (SECURITY_SPEC.md
+// MON-*): a history-store outage must not break authentication.
+func (s *service) recordLogin(ctx context.Context, userID *int64, ident string, method domain.LoginMethod, success, newDevice bool, deviceID string, ip, ua *string) {
+	if s.deps.LoginHistory == nil {
+		return
+	}
+	_ = s.deps.LoginHistory.Record(ctx, domain.LoginEvent{
+		UserID:     userID,
+		Identifier: ident,
+		Method:     method,
+		Success:    success,
+		NewDevice:  newDevice,
+		DeviceID:   deviceID,
+		IPAddress:  ip,
+		UserAgent:  ua,
+		CreatedAt:  s.now(),
 	})
 }

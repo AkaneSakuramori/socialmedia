@@ -39,6 +39,9 @@ func TestMain(m *testing.M) {
 	if p, err := platformpg.Open(ctx, dsn, 1); err == nil {
 		_, _ = p.Exec(ctx, `DELETE FROM user_sessions WHERE id >= 70000`)
 		_, _ = p.Exec(ctx, `DELETE FROM user_sessions WHERE user_id >= 9000000`)
+		_, _ = p.Exec(ctx, `DELETE FROM auth_tokens WHERE user_id >= 9000000`)
+		_, _ = p.Exec(ctx, `DELETE FROM login_history WHERE user_id >= 9000000 OR user_id IS NULL`)
+		_, _ = p.Exec(ctx, `DELETE FROM audit_logs WHERE actor_user_id >= 9000000`)
 		_, _ = p.Exec(ctx, `DELETE FROM users WHERE id >= 9000000`)
 		p.Close()
 	}
@@ -496,9 +499,9 @@ func TestIntegExpireIdleAndPurge(t *testing.T) {
 
 	// Two active sessions; force one idle well beyond the sweep window.
 	for _, c := range []struct {
-		id    int64
-		dev   string
-		idle  time.Time
+		id   int64
+		dev  string
+		idle time.Time
 	}{
 		{72301, "d-idle", now.Add(-40 * 24 * time.Hour)},
 		{72302, "d-fresh", now},

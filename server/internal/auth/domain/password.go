@@ -34,7 +34,7 @@ func ValidatePassword(password, identifier string) error {
 		return &ValidationError{Field: "password", Reason: "too_long"}
 	}
 	lower := strings.ToLower(password)
-	if strings.Contains(lower, strings.ToLower(identifier)) {
+	if identifier != "" && strings.Contains(lower, strings.ToLower(identifier)) {
 		return &ValidationError{Field: "password", Reason: "contains_identifier"}
 	}
 	switch strings.ToLower(password) {

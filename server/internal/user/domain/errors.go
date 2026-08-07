@@ -14,4 +14,10 @@ var (
 	// ErrUsernameTaken means the username is already held (API.md §4.1 → 409
 	// USERNAME_TAKEN).
 	ErrUsernameTaken = errors.New("user: username taken")
+	// ErrAccountAlreadyDeleted means the account is already soft-deleted and a
+	// deletion was already requested (API.md §5.5 → 409).
+	ErrAccountAlreadyDeleted = errors.New("user: account already deleted")
+	// ErrAccountRestoreExpired means the deletion grace window passed and the
+	// account can no longer be restored (DATABASE.md §4.1 retention).
+	ErrAccountRestoreExpired = errors.New("user: account restore window expired")
 )

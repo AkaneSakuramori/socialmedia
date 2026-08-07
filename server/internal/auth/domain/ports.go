@@ -13,6 +13,9 @@ type CredentialRepository interface {
 	Create(ctx context.Context, dbtx tx.Tx, c *Credential) error
 	// FindPassword returns the user's non-revoked password credential.
 	FindPassword(ctx context.Context, userID int64) (*Credential, error)
+	// ReplacePassword atomically replaces the user's password hash in place
+	// (password change/reset; DATABASE.md §4.3 has one row per method).
+	ReplacePassword(ctx context.Context, dbtx tx.Tx, userID int64, hash PasswordHash) error
 }
 
 // SessionRepository owns persistence for user_sessions (DATABASE.md §4.4).
@@ -59,6 +62,13 @@ type SessionRepository interface {
 	// RevokeOthersByUserID revokes every active session of the user except the
 	// caller's current one ("log out other devices").
 	RevokeOthersByUserID(ctx context.Context, dbtx tx.Tx, userID, keepSessionID int64) error
+	// SuspendOthersByUserID suspends every active session except the caller's
+	// current one (SECURITY_SPEC.md PASS-4 / SESS-4: a password change or
+	// security event suspends the other sessions, the current one keeps working).
+	SuspendOthersByUserID(ctx context.Context, dbtx tx.Tx, userID, keepSessionID int64) error
+	// SuspendAllByUserID suspends every active session of the user (password
+	// reset/recovery: no current session exists to keep, REC-4).
+	SuspendAllByUserID(ctx context.Context, dbtx tx.Tx, userID int64) error
 	// Rename updates the user-visible device label of an active session of the
 	// user. It returns ErrSessionNotFound when the session is not active or not
 	// owned by the user.
@@ -114,11 +124,12 @@ type LoginThrottle interface {
 // AuditEvent is a security-relevant event for the audit trail
 // (SECURITY_SPEC.md AUTH-7, DATABASE.md §8.5).
 type AuditEvent struct {
-	ActorUserID *int64
-	Action      string // e.g. "auth.login", "auth.login_failed"
-	ResourceID  *int64 // e.g. the user id
-	IPAddress   *string
-	Details     map[string]string
+	ActorUserID  *int64
+	Action       string // e.g. "auth.login", "auth.login_failed"
+	ResourceType string // e.g. "user", "session"; defaults to "user"
+	ResourceID   *int64 // e.g. the user id
+	IPAddress    *string
+	Details      map[string]string
 }
 
 // AuditLogger records security events. Adapters are best-effort: an audit
@@ -170,4 +181,18 @@ type OTPVerifier interface {
 // IDGenerator mints snowflake-style 64-bit ids (internal/platform/idgen).
 type IDGenerator interface {
 	NextID() (int64, error)
+}
+
+// AuthTokenRepository owns persistence for auth_tokens (single-use
+// recovery/verification tokens). Only hashed tokens are stored; Consume is a
+// single atomic UPDATE so a token is used at most once and is TTL-bounded
+// (SECURITY_SPEC.md REC-6).
+type AuthTokenRepository interface {
+	// Create inserts a token within the given transaction.
+	Create(ctx context.Context, dbtx tx.Tx, t *AuthToken) error
+	// Consume atomically claims an unused, unexpired token and marks it used.
+	// It returns the token (with its purpose/data) or ErrRecoveryTokenInvalid
+	// when the hash is unknown, already used, or expired — all reported
+	// identically so a token's state is not enumerable.
+	Consume(ctx context.Context, dbtx tx.Tx, tokenHash string) (*AuthToken, error)
 }

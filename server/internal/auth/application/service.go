@@ -53,6 +53,47 @@ type Service interface {
 	// PurgeRevokedSessions runs the retention purge for revoked/expired
 	// sessions (DATABASE.md §4.4). It returns the number of rows deleted.
 	PurgeRevokedSessions(ctx context.Context) (int64, error)
+
+	// ---- Milestone 5: Account security, recovery & production hardening ----
+
+	// RequestPasswordReset issues a single-use reset token for the account
+	// behind the identifier (forgot-password). The response is uniform for
+	// known and unknown identifiers (no enumeration). The plaintext token is
+	// returned to the delivery layer for out-of-band delivery (email/SMS).
+	RequestPasswordReset(ctx context.Context, cmd RequestPasswordResetCommand) (*RequestPasswordResetResult, error)
+	// ResetPassword consumes a reset token, sets a new password, and suspends
+	// every session of the account (REC-4: recovery revokes existing sessions).
+	ResetPassword(ctx context.Context, cmd ResetPasswordCommand) error
+	// ChangePassword verifies the current credential (AUTH-9 step-up), sets a
+	// new password, and suspends every other session (PASS-4 / SESS-4).
+	ChangePassword(ctx context.Context, cmd ChangePasswordCommand) error
+
+	// RequestEmailChange starts a verified email change: after step-up it
+	// issues a single-use confirmation token bound to the pending email.
+	RequestEmailChange(ctx context.Context, cmd RequestEmailChangeCommand) (*RequestEmailChangeResult, error)
+	// ConfirmEmailChange consumes the confirmation token and applies the new
+	// email (email verification completion).
+	ConfirmEmailChange(ctx context.Context, cmd ConfirmEmailChangeCommand) error
+	// RequestPhoneChange starts a verified phone change.
+	RequestPhoneChange(ctx context.Context, cmd RequestPhoneChangeCommand) (*RequestPhoneChangeResult, error)
+	// ConfirmPhoneChange consumes the confirmation token and applies the new
+	// phone (phone verification completion).
+	ConfirmPhoneChange(ctx context.Context, cmd ConfirmPhoneChangeCommand) error
+
+	// DeleteAccount soft-deletes the account (DATABASE.md §4.1: account_state
+	// 'deleted' + deleted_at), revokes every session, and bumps the token
+	// version. Requires step-up re-authentication (AUTH-9).
+	DeleteAccount(ctx context.Context, cmd DeleteAccountCommand) error
+	// RestoreAccount reactivates a soft-deleted account within the grace
+	// window after identifier verification via OTP (REC-1).
+	RestoreAccount(ctx context.Context, cmd RestoreAccountCommand) error
+	// PurgeDeletedAccounts hard-deletes accounts whose grace period elapsed
+	// (DATABASE.md §4.1 retention worker). Returns the number of accounts purged.
+	PurgeDeletedAccounts(ctx context.Context) (int64, error)
+
+	// ListLoginHistory returns the caller's own login history (login-history
+	// security screen), newest first.
+	ListLoginHistory(ctx context.Context, cmd ListLoginHistoryCommand) ([]LoginEventInfo, error)
 }
 
 // LoginCommand is the validated input for authentication (API.md §4.3).
@@ -131,7 +172,7 @@ type SessionInfo struct {
 
 // ListSessionsCommand identifies the caller and its own session.
 type ListSessionsCommand struct {
-	UserID          int64
+	UserID           int64
 	CurrentSessionID int64
 }
 
@@ -168,6 +209,148 @@ type LogoutAllCommand struct {
 	UserID int64
 }
 
+// Reauth is the step-up re-confirmation payload for sensitive actions
+// (SECURITY_SPEC.md AUTH-9). A current password or a fresh OTP re-confirms
+// the principal; the chosen Method selects which.
+type Reauth struct {
+	Method   domain.LoginMethod // password | otp
+	Password string
+	OTPCode  string
+}
+
+// RequestPasswordResetCommand starts the forgot-password flow
+// (SECURITY_SPEC.md §29 REC-1). The response is uniform regardless of whether
+// the identifier exists, so the endpoint does not enumerate accounts.
+type RequestPasswordResetCommand struct {
+	IdentifierType domain.IdentifierType
+	Identifier     string
+	IPAddress      *string
+	UserAgent      *string
+}
+
+// RequestPasswordResetResult carries the single-use reset token for the
+// delivery layer. Token is empty when the identifier is unknown (no account
+// to email); it must never be echoed in an API response.
+type RequestPasswordResetResult struct {
+	Token     string
+	ExpiresIn int64
+}
+
+// ResetPasswordCommand completes a password reset (REC-1 identifier
+// verification). Token is the single-use reset credential; NewPassword is
+// validated against PASS-2.
+type ResetPasswordCommand struct {
+	Token       string
+	NewPassword string
+	IPAddress   *string
+	UserAgent   *string
+}
+
+// ChangePasswordCommand changes the password of the authenticated caller,
+// requiring step-up re-confirmation (AUTH-9). All other sessions are
+// suspended (PASS-4).
+type ChangePasswordCommand struct {
+	UserID      int64
+	SessionID   int64
+	Reauth      Reauth
+	NewPassword string
+	IPAddress   *string
+	UserAgent   *string
+}
+
+// RequestEmailChangeCommand begins an email change: step-up re-auth, then a
+// verification token is issued for the new email (AUTH-9).
+type RequestEmailChangeCommand struct {
+	UserID    int64
+	SessionID int64
+	NewEmail  string
+	Reauth    Reauth
+	IPAddress *string
+	UserAgent *string
+}
+
+// RequestEmailChangeResult carries the verification token for out-of-band
+// delivery to the new email.
+type RequestEmailChangeResult struct {
+	Token     string
+	ExpiresIn int64
+}
+
+// ConfirmEmailChangeCommand completes an email change by consuming the
+// verification token.
+type ConfirmEmailChangeCommand struct {
+	Token     string
+	IPAddress *string
+	UserAgent *string
+}
+
+// RequestPhoneChangeCommand begins a phone change (AUTH-9 step-up).
+type RequestPhoneChangeCommand struct {
+	UserID    int64
+	SessionID int64
+	NewPhone  string
+	Reauth    Reauth
+	IPAddress *string
+	UserAgent *string
+}
+
+// RequestPhoneChangeResult carries the verification token for out-of-band
+// delivery to the new phone.
+type RequestPhoneChangeResult struct {
+	Token     string
+	ExpiresIn int64
+}
+
+// ConfirmPhoneChangeCommand completes a phone change by consuming the
+// verification token.
+type ConfirmPhoneChangeCommand struct {
+	Token     string
+	IPAddress *string
+	UserAgent *string
+}
+
+// DeleteAccountCommand soft-deletes the authenticated account (API.md §5.5),
+// requiring step-up re-confirmation. All sessions are revoked and the global
+// token version bumped; a grace period precedes the hard purge.
+type DeleteAccountCommand struct {
+	UserID    int64
+	SessionID int64
+	Reauth    Reauth
+	IPAddress *string
+	UserAgent *string
+}
+
+// RestoreAccountCommand reactivates a soft-deleted account within the grace
+// period (DATABASE.md §4.1), gated by identifier verification via OTP
+// (REC-1 hierarchy).
+type RestoreAccountCommand struct {
+	IdentifierType domain.IdentifierType
+	Identifier     string
+	OTPCode        string
+	IPAddress      *string
+	UserAgent      *string
+}
+
+// ListLoginHistoryCommand returns the caller's own login history (security
+// review screen). Limit caps the page size.
+type ListLoginHistoryCommand struct {
+	UserID int64
+	Limit  int
+}
+
+// LoginEventInfo is the public view of one login-history row.
+type LoginEventInfo struct {
+	ID         int64
+	Method     string
+	Success    bool
+	NewDevice  bool
+	DeviceID   string
+	IPAddress  *string
+	UserAgent  *string
+	Identifier string
+	CreatedAt  time.Time
+}
+
 // Deps is the constructor-injected dependency set for the auth service.
 type Deps struct {
 	Users       userdomain.UserRepository
@@ -188,6 +371,29 @@ type Deps struct {
 	// SessionRetention is how long revoked/expired sessions are kept before
 	// purge (DATABASE.md §4.4); used by PurgeRevokedSessions.
 	SessionRetention time.Duration
+
+	// Account-security dependencies (milestone 5).
+
+	// AuthTokens stores single-use recovery/verification tokens (password
+	// reset, email/phone change).
+	AuthTokens domain.AuthTokenRepository
+	// LoginHistory records per-login events for the security-review screen.
+	LoginHistory domain.LoginHistoryRepository
+	// Risk is the risk-based validation hook (AUTH-11). Inject
+	// domain.PermissiveRisk() when richer signals are not yet wired.
+	Risk domain.RiskEvaluator
+	// Notifier surfaces security events to the account holder. Inject
+	// domain.NoopNotifier() until the notification milestone.
+	Notifier domain.SecurityNotifier
+	// PasswordResetTokenTTL is the lifetime of a password-reset token
+	// (default 30m).
+	PasswordResetTokenTTL time.Duration
+	// ChangeVerificationTokenTTL is the lifetime of an email/phone-change
+	// verification token (default 15m).
+	ChangeVerificationTokenTTL time.Duration
+	// DeletionGracePeriod is how long a soft-deleted account can be restored
+	// before the hard purge (default 30d; API.md §5.5).
+	DeletionGracePeriod time.Duration
 }
 
 type service struct {

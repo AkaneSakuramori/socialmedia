@@ -46,21 +46,24 @@ func TestLoadDefaultsForDev(t *testing.T) {
 
 func TestLoadReadsEnvironment(t *testing.T) {
 	setEnv(t, map[string]string{
-		"APP_ENV":               "staging",
-		"APP_HTTP_PORT":         "9090",
-		"APP_PG_DSN":            "postgres://user:pass@db:5432/inchat",
-		"APP_PG_MAX_CONNS":      "25",
-		"APP_REDIS_ADDR":        "redis:6379",
-		"APP_REDIS_DB":          "3",
-		"APP_JWT_PRIVATE_KEY":   "c2VjcmV0c2VlZA==",
-		"APP_ACCESS_TOKEN_TTL":  "5m",
-		"APP_REFRESH_TOKEN_TTL": "480h",
-		"APP_SESSION_IDLE_TIMEOUT": "240h",
-		"APP_SESSION_RETENTION":    "720h",
-		"APP_ARGON2_MEMORY_KIB": "32768",
-		"APP_ARGON2_TIME":       "2",
-		"APP_ARGON2_THREADS":    "2",
-		"APP_IDGEN_NODE_ID":     "12",
+		"APP_ENV":                           "staging",
+		"APP_HTTP_PORT":                     "9090",
+		"APP_PG_DSN":                        "postgres://user:pass@db:5432/inchat",
+		"APP_PG_MAX_CONNS":                  "25",
+		"APP_REDIS_ADDR":                    "redis:6379",
+		"APP_REDIS_DB":                      "3",
+		"APP_JWT_PRIVATE_KEY":               "c2VjcmV0c2VlZA==",
+		"APP_ACCESS_TOKEN_TTL":              "5m",
+		"APP_REFRESH_TOKEN_TTL":             "480h",
+		"APP_SESSION_IDLE_TIMEOUT":          "240h",
+		"APP_SESSION_RETENTION":             "720h",
+		"APP_PASSWORD_RESET_TOKEN_TTL":      "20m",
+		"APP_CHANGE_VERIFICATION_TOKEN_TTL": "10m",
+		"APP_DELETION_GRACE_PERIOD":         "168h",
+		"APP_ARGON2_MEMORY_KIB":             "32768",
+		"APP_ARGON2_TIME":                   "2",
+		"APP_ARGON2_THREADS":                "2",
+		"APP_IDGEN_NODE_ID":                 "12",
 	})
 	cfg, err := Load()
 	if err != nil {
@@ -74,6 +77,9 @@ func TestLoadReadsEnvironment(t *testing.T) {
 	}
 	if cfg.AccessTokenTTL.String() != "5m0s" || cfg.RefreshTokenTTL.String() != "480h0m0s" {
 		t.Errorf("unexpected token TTLs: %s", cfg.String())
+	}
+	if cfg.PasswordResetTokenTTL.String() != "20m0s" || cfg.ChangeVerificationTokenTTL.String() != "10m0s" || cfg.DeletionGracePeriod.String() != "168h0m0s" {
+		t.Errorf("unexpected recovery config: %s", cfg.String())
 	}
 	if cfg.Argon2Memory != 32768 || cfg.Argon2Time != 2 || cfg.Argon2Threads != 2 || cfg.IDGenNodeID != 12 {
 		t.Errorf("unexpected auth config: %s", cfg.String())
@@ -167,6 +173,20 @@ func TestValidateAuthFields(t *testing.T) {
 			},
 			expect: "APP_LOGIN_LOCKOUT_DURATION",
 		},
+		{
+			name: "reset token ttl zero",
+			mutate: func(c *Config) {
+				c.PasswordResetTokenTTL = 0
+			},
+			expect: "APP_PASSWORD_RESET_TOKEN_TTL",
+		},
+		{
+			name: "deletion grace zero",
+			mutate: func(c *Config) {
+				c.DeletionGracePeriod = 0
+			},
+			expect: "APP_DELETION_GRACE_PERIOD",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -185,24 +205,27 @@ func TestValidateAuthFields(t *testing.T) {
 
 func TestValidateAuthFieldsAcceptDefaults(t *testing.T) {
 	cfg := Config{
-		AppEnv:               "dev",
-		HTTPPort:             "8080",
-		ReadHeaderTimeout:    5 * time.Second,
-		ShutdownTimeout:      15 * time.Second,
-		PGDSN:                localPGDSN,
-		PGMaxConns:           10,
-		RedisAddr:            "localhost:6379",
-		JWTIssuer:            "https://api.socialmedia.example",
-		JWTAudience:          "inchat-api",
-		AccessTokenTTL:       15 * time.Minute,
-		RefreshTokenTTL:      30 * 24 * time.Hour,
-		Argon2Memory:         64 * 1024,
-		Argon2Time:           3,
-		Argon2Threads:        4,
-		LoginMaxFailures:     5,
-		LoginLockoutDuration: 5 * time.Minute,
-		SessionIdleTimeout:   30 * 24 * time.Hour,
-		SessionRetention:     90 * 24 * time.Hour,
+		AppEnv:                     "dev",
+		HTTPPort:                   "8080",
+		ReadHeaderTimeout:          5 * time.Second,
+		ShutdownTimeout:            15 * time.Second,
+		PGDSN:                      localPGDSN,
+		PGMaxConns:                 10,
+		RedisAddr:                  "localhost:6379",
+		JWTIssuer:                  "https://api.socialmedia.example",
+		JWTAudience:                "inchat-api",
+		AccessTokenTTL:             15 * time.Minute,
+		RefreshTokenTTL:            30 * 24 * time.Hour,
+		Argon2Memory:               64 * 1024,
+		Argon2Time:                 3,
+		Argon2Threads:              4,
+		LoginMaxFailures:           5,
+		LoginLockoutDuration:       5 * time.Minute,
+		SessionIdleTimeout:         30 * 24 * time.Hour,
+		SessionRetention:           90 * 24 * time.Hour,
+		PasswordResetTokenTTL:      30 * time.Minute,
+		ChangeVerificationTokenTTL: 15 * time.Minute,
+		DeletionGracePeriod:        30 * 24 * time.Hour,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() with default auth fields error = %v", err)
