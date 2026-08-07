@@ -4,7 +4,7 @@
 
 InChat is a social media and messaging platform designed and engineered for India first — from the ground up. It pairs a modern, offline-first Flutter app with a high-performance Go backend, built to deliver fast, reliable messaging on the real-world devices and networks that India runs on.
 
-> **Status:** Design finalized · Go backend foundation (Sprint 0) shipped · Sprint 1 in progress (registration, login + lockout, refresh rotation with reuse detection, and device/session management with logout landed).
+> **Status:** Design finalized · Go backend foundation (Sprint 0) shipped · Sprint 1 in progress (registration, login + lockout, refresh rotation with reuse detection, device/session management with logout, and account security & recovery — forgot/reset/change password, verified email/phone change, soft delete + restore, login history, audit log — all landed).
 >
 > This repository is the **public home of InChat's engineering documentation** — the source of truth for the product: architecture, database, API, backend and Flutter engineering guides, DevOps, quality/release, and security standards. It intentionally contains **documentation only**; production code lives in the **[InChat code repository](https://github.com/AkaneSakuramori/inchat)**.
 
@@ -26,7 +26,8 @@ InChat is a social media and messaging platform designed and engineered for Indi
 - **Offline-first sync** — optimistic sends, durable offline queue, deduplicated delta sync, and WS resume with no gaps or duplicates
 - **Push notifications** — FCM/APNs with per-device token management
 - **Search** — fast, scoped to your conversations
-- **Rich authentication** — passkeys (WebAuthn), OTP fallback, password; refresh-token rotation with reuse detection
+- **Rich authentication** — passkeys (WebAuthn), OTP fallback, password; refresh-token rotation with reuse detection; forgot-password recovery, verified email/phone change
+- **Account security** — change password (revokes other sessions), soft delete with grace-window restore, login history, risk-based escalation hooks, audit logging
 - **Device management** — see and revoke any session, sign out everywhere
 - **Admin & moderation** — SSO-protected console, content reports, takedowns, audit trail
 - **Security & privacy** — signed media URLs, PostgreSQL RLS, audit logging, DPDP-aligned data practices, compliance roadmap
@@ -99,7 +100,7 @@ See `SECURITY.md` and `SECURITY_SPEC.md` for the full standard.
 
 - [x] **Phase 0 — Design:** architecture, database, API, and engineering documentation finalized
 - [x] **Sprint 0 — Backend Foundation:** modular Go monolith skeleton — config, DI, logging, RFC 9457 errors, health probes, PostgreSQL/Redis, Docker/Compose, CI/CD
-- [ ] **Sprint 1 — Auth & Identity:** registration, login (password/OTP, AUTH-5 lockout), refresh-token rotation with reuse detection, and device/session management with logout (list/rename/revoke/sign-out-all, SESS-3/SESS-6) shipped in `internal/auth`; self-service OTP and account recovery remain, then HTTP delivery (`/v1/auth/*`)
+- [ ] **Sprint 1 — Auth & Identity:** registration, login (password/OTP, AUTH-5 lockout), refresh-token rotation with reuse detection, device/session management with logout (list/rename/revoke/sign-out-all, SESS-3/SESS-6), and account security & recovery (forgot/reset/change password, verified email/phone change, soft delete + grace-window restore + purge, login history, risk escalation hooks, audit log) shipped in `internal/auth`; self-service OTP and HTTP delivery (`/v1/auth/*`) remain
 - [ ] **Phase 1 — India launch:** application code (backend + Flutter app), infrastructure, canary releases, staged app rollout
 - [ ] **Phase 2 — Scale:** India-scale growth, passkeys as default, key transparency, E2EE pilot
 - [ ] **Phase 3 — Global:** multi-region, GDPR posture, end-to-end encryption mode
