@@ -34,6 +34,7 @@ import (
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/postgres"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/redis"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/delivery/ws"
+	realtimeinfra "github.com/AkaneSakuramori/socialmedia/server/internal/realtime/infra"
 	"github.com/AkaneSakuramori/socialmedia/server/pkg/clock"
 )
 
@@ -155,11 +156,20 @@ func Run(ctx context.Context) error {
 
 	// Realtime gateway (API.md §16–18): the WS endpoint authenticates each
 	// socket, binds it to (user_id, session_id), and drives C2S ops via the chat
-	// service. Fan-out and resume come with the dispatcher milestone.
+	// service. Fan-out is log-dispatch: the outbox relay publishes committed
+	// change_log rows to Redis; the dispatcher routes them to local sockets
+	// (ARCHITECTURE.md §13.1).
 	changeLogRepo := chatpostgres.NewChangeLogRepo(pool)
 	wsHub := ws.NewHub(ws.DefaultConfig(), ws.NewHandler(chatSvc, log), log)
 	wsEndpoint := ws.NewEndpoint(wsHub, authSvc, changeLogRepo, log)
 	revokeWatcher := ws.NewSessionRevokeWatcher(wsHub, log)
+	wsDispatcher := ws.NewDispatcher(wsHub, log)
+	wsRelay := realtimeinfra.NewRelay(
+		changeLogRepo,
+		realtimeinfra.NewRedisPublisher(redisClient),
+		realtimeinfra.DefaultRelayConfig(),
+		log,
+	)
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", chatRoutes.Router())
@@ -170,11 +180,25 @@ func Run(ctx context.Context) error {
 	// Session-revoke watcher: force-closes sockets bound to a revoked session
 	// (API.md §18.19, code 4403). Best-effort; a missed signal is caught by the
 	// next gateway token check.
-	wctx, stopRevoke := context.WithCancel(context.Background())
-	defer stopRevoke()
+	wctx, stopWatchers := context.WithCancel(context.Background())
+	defer stopWatchers()
 	go func() {
 		if err := revokeWatcher.Run(wctx, redisClient); err != nil {
 			log.Error("realtime: session-revoke watcher stopped", "error", err)
+		}
+	}()
+
+	// Outbox relay + dispatcher: move committed change_log rows onto the Redis
+	// backplane and route them to local sockets. The relay starts at the current
+	// change_log head; pre-existing history is not re-published (sync backfills).
+	go func() {
+		if err := wsRelay.Run(wctx); err != nil {
+			log.Error("realtime: outbox relay stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := wsDispatcher.Run(wctx, redisClient); err != nil {
+			log.Error("realtime: dispatcher stopped", "error", err)
 		}
 	}()
 

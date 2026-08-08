@@ -141,6 +141,18 @@ type ChangeLogEntry struct {
 	Payload         []byte
 }
 
+// ChangeLogRow is a committed change_log row as read by consumers (the outbox
+// relay). GlobalSeq is the shared monotonic cursor (DATABASE.md §7.1).
+type ChangeLogRow struct {
+	GlobalSeq       int64
+	EventType       string
+	ConversationID  *int64
+	EntityID        *int64
+	ActorUserID     *int64
+	AffectedUserIDs []int64
+	Payload         []byte
+}
+
 // ChangeLog event types owned by the chat module (DATABASE.md §7.1 CHECK).
 const (
 	EventConversationCreated    = "conversation.created"
@@ -162,6 +174,10 @@ type ChangeLogRepository interface {
 	// is 0 when no change has ever been committed; the WS hello_ack and resume
 	// reconciliation use it as the "current global_seq" cursor (API.md §18.1).
 	Head(ctx context.Context) (int64, error)
+	// ListAfter returns committed rows with global_seq > after, in global
+	// order, up to limit. It is the keyset read the outbox relay polls
+	// (DATABASE.md §7.1); an empty result is not an error.
+	ListAfter(ctx context.Context, after, limit int64) ([]ChangeLogRow, error)
 }
 
 // SequenceSource allocates per-conversation message sequences (ARCHITECTURE.md

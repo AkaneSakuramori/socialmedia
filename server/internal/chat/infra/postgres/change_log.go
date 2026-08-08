@@ -56,3 +56,34 @@ func (r *ChangeLogRepo) Head(ctx context.Context) (int64, error) {
 	}
 	return head, nil
 }
+
+// ListAfter returns committed rows with global_seq > after in global order
+// (keyset read, DATABASE.md §7.1). An empty result is an empty slice, not an
+// error.
+func (r *ChangeLogRepo) ListAfter(ctx context.Context, after, limit int64) ([]domain.ChangeLogRow, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT global_seq, event_type, conversation_id, entity_id, actor_user_id,
+		       COALESCE(affected_user_ids, '{}'), payload
+		FROM change_log
+		WHERE global_seq > $1
+		ORDER BY global_seq
+		LIMIT $2`, after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("chat: change_log list after %d: %w", after, err)
+	}
+	defer rows.Close()
+
+	out := make([]domain.ChangeLogRow, 0, limit)
+	for rows.Next() {
+		var row domain.ChangeLogRow
+		if err := rows.Scan(&row.GlobalSeq, &row.EventType, &row.ConversationID,
+			&row.EntityID, &row.ActorUserID, &row.AffectedUserIDs, &row.Payload); err != nil {
+			return nil, fmt.Errorf("chat: change_log scan: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("chat: change_log rows: %w", err)
+	}
+	return out, nil
+}

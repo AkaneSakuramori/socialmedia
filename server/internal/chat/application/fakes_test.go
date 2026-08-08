@@ -712,6 +712,30 @@ func (r *fakeChangeLogRepo) Append(_ context.Context, _ tx.Tx, es []domain.Chang
 
 func (r *fakeChangeLogRepo) Head(context.Context) (int64, error) { return r.head, nil }
 
+func (r *fakeChangeLogRepo) ListAfter(_ context.Context, after, limit int64) ([]domain.ChangeLogRow, error) {
+	var out []domain.ChangeLogRow
+	for _, e := range r.entries {
+		if int64(len(out)) >= limit {
+			break
+		}
+		row := domain.ChangeLogRow{
+			EventType:       e.EventType,
+			ConversationID:  e.ConversationID,
+			EntityID:        e.EntityID,
+			ActorUserID:     e.ActorUserID,
+			AffectedUserIDs: e.AffectedUserIDs,
+			Payload:         e.Payload,
+		}
+		r.head++
+		row.GlobalSeq = r.head
+		if row.GlobalSeq <= after {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
 func (r *fakeChangeLogRepo) types() []string {
 	var out []string
 	for _, e := range r.entries {
