@@ -6,6 +6,61 @@ versioning follows [SemVer](https://semver.org/). Newest entries appear first.
 
 ## [Unreleased]
 
+### Sprint 2 - Core Messaging (milestone 2: message domain, persistence, receipts, and reactions)
+
+#### Added
+- **`server/migrations/000007_messages`** - `messages` with per-conversation
+  sequence primary key, global delta sequence, per-sender client-message
+  idempotency guard, mentions/reply metadata, edit/tombstone state, plus
+  `message_edits` and `message_reactions`; matching `down.sql`.
+- **Message domain and persistence** - message/reaction/receipt aggregates and
+  ports; PostgreSQL message/reaction repositories; Redis `INCR` sequence hot
+  path with PostgreSQL durable floor/fallback and composite-PK collision guard.
+- **Message application use-cases** - atomic send and idempotent replay,
+  history/delta pagination, get/edit/delete, reactions, read/delivery receipts,
+  sender/read-status enrichment, and transactional `change_log` events for
+  every write.
+- **Message HTTP delivery** - REST routes for API sections 8 and 10: message
+  list/send/get/edit/delete, reaction add/remove/list, and receipt update/list;
+  field validation and `MESSAGE_NOT_FOUND` error mapping.
+- **Test coverage** - domain, application, and HTTP handler unit suites; tagged
+  PostgreSQL/Redis integration tests for repository invariants, keyset/delta
+  ordering, idempotency, edit/tombstone behavior, reaction lifecycle,
+  monotonic receipts, Redis loss/fallback, concurrent sends/retries, and
+  send/receipt/edit/delete/reaction stress scenarios.
+- **`architecture/SECURITY_OPERATIONS.md`** - operator-owned incident,
+  database/PITR recovery, backup verification, credential/signing/encryption
+  key rotation, disaster recovery, deployment, container hardening,
+  supply-chain, monitoring, and release-evidence runbooks.
+
+#### Changed
+- **Go toolchain alignment** - Docker and GitHub Actions now use Go 1.25,
+  matching `server/go.mod`; project setup documentation reflects the required
+  toolchain so local, CI, and release builds cannot drift.
+- **Transaction-safe fan-out reads** - added the dependency-free `tx.Querier`
+  read surface and pool adapter. Transactional member/user/idempotency lookups
+  now use the open transaction instead of taking additional pool connections;
+  pre-transaction and post-commit reads use the injected pool querier.
+- **Receipt cursor consistency** - marking a message read atomically advances
+  delivery to at least the read sequence, matching the existing database
+  constraint that delivery cannot trail read; both cursors remain monotonic.
+- **Composition root** - the API now wires `MessageRepo`, `ReactionRepo`, the
+  PostgreSQL/Redis sequence source, and the pool-backed read querier into chat.
+
+#### Fixed
+- **Domain route startup** - the platform HTTP server mounts feature routes at
+  `/v1/` instead of registering the root pattern twice; a regression test now
+  constructs the server with domain routes and verifies fallback 404 handling.
+- **Durable send replay** - `MessageRepo.Insert` now uses `RETURNING id`; a
+  partial-unique conflict correctly reports `inserted=false` instead of
+  emitting a duplicate `message.created` event for a row not inserted.
+- **Bounded-pool deadlock** - removed nested pool acquisition while write
+  transactions held conversation/sequence locks, preventing concurrent sends
+  from circularly waiting on the connection pool.
+- **Read receipt writes** - replaced the two-step cursor update whose
+  intermediate state violated `conversation_members` consistency checks with
+  one atomic max-merge.
+
 ### Sprint 2 — Core Messaging (milestone 1: conversation domain, delivery wiring & database recovery)
 
 #### Added
