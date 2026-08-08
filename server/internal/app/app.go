@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -32,6 +33,7 @@ import (
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/observability"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/postgres"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/redis"
+	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/delivery/ws"
 	"github.com/AkaneSakuramori/socialmedia/server/pkg/clock"
 )
 
@@ -150,7 +152,31 @@ func Run(ctx context.Context) error {
 	})
 
 	chatRoutes := chathttp.New(chatSvc, authSvc, redisClient)
-	srv := httpserver.New(cfg, log, liveness, readiness, chatRoutes.Router())
+
+	// Realtime gateway (API.md §16–18): the WS endpoint authenticates each
+	// socket, binds it to (user_id, session_id), and drives C2S ops via the chat
+	// service. Fan-out and resume come with the dispatcher milestone.
+	changeLogRepo := chatpostgres.NewChangeLogRepo(pool)
+	wsHub := ws.NewHub(ws.DefaultConfig(), ws.NewHandler(chatSvc, log), log)
+	wsEndpoint := ws.NewEndpoint(wsHub, authSvc, changeLogRepo, log)
+	revokeWatcher := ws.NewSessionRevokeWatcher(wsHub, log)
+
+	root := http.NewServeMux()
+	root.Handle("/v1/", chatRoutes.Router())
+	root.Handle("GET /v1/ws", wsEndpoint)
+
+	srv := httpserver.New(cfg, log, liveness, readiness, root)
+
+	// Session-revoke watcher: force-closes sockets bound to a revoked session
+	// (API.md §18.19, code 4403). Best-effort; a missed signal is caught by the
+	// next gateway token check.
+	wctx, stopRevoke := context.WithCancel(context.Background())
+	defer stopRevoke()
+	go func() {
+		if err := revokeWatcher.Run(wctx, redisClient); err != nil {
+			log.Error("realtime: session-revoke watcher stopped", "error", err)
+		}
+	}()
 
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -176,6 +202,11 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("graceful shutdown: %w", err)
 	}
 	log.Info("http server stopped")
+
+	// Drain the realtime gateway: broadcast server.shutdown, flush, then force-
+	// close every socket (API.md §18.21, WS-8).
+	wsHub.Shutdown(shutdownCtx, cfg.ShutdownTimeout)
+	log.Info("realtime gateway stopped")
 
 	// Defers close Redis, then the pool, in reverse order.
 	log.Info("api-server stopped cleanly")

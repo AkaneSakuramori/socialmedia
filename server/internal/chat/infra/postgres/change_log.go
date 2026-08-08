@@ -46,3 +46,13 @@ func (r *ChangeLogRepo) Append(ctx context.Context, dbtx tx.Tx, entries []domain
 	}
 	return nil
 }
+
+// Head returns the highest committed global_seq (0 when empty).
+func (r *ChangeLogRepo) Head(ctx context.Context) (int64, error) {
+	var head int64
+	err := r.pool.QueryRow(ctx, `SELECT COALESCE(MAX(global_seq), 0) FROM change_log`).Scan(&head)
+	if err != nil {
+		return 0, fmt.Errorf("chat: change_log head: %w", err)
+	}
+	return head, nil
+}

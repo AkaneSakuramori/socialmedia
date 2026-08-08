@@ -702,12 +702,15 @@ func contains(ids []int64, id int64) bool {
 
 type fakeChangeLogRepo struct {
 	entries []domain.ChangeLogEntry
+	head    int64
 }
 
 func (r *fakeChangeLogRepo) Append(_ context.Context, _ tx.Tx, es []domain.ChangeLogEntry) error {
 	r.entries = append(r.entries, es...)
 	return nil
 }
+
+func (r *fakeChangeLogRepo) Head(context.Context) (int64, error) { return r.head, nil }
 
 func (r *fakeChangeLogRepo) types() []string {
 	var out []string

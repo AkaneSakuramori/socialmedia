@@ -158,6 +158,10 @@ const (
 type ChangeLogRepository interface {
 	// Append inserts outbox entries within the given transaction.
 	Append(ctx context.Context, dbtx tx.Tx, entries []ChangeLogEntry) error
+	// Head returns the highest committed global_seq (the change_log head). It
+	// is 0 when no change has ever been committed; the WS hello_ack and resume
+	// reconciliation use it as the "current global_seq" cursor (API.md §18.1).
+	Head(ctx context.Context) (int64, error)
 }
 
 // SequenceSource allocates per-conversation message sequences (ARCHITECTURE.md

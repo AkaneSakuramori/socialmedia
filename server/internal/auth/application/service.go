@@ -101,6 +101,10 @@ type Service interface {
 	// freshness (SESS-6), and that the token's session is still active. The
 	// delivery bearer middleware is the sole caller.
 	Authenticate(ctx context.Context, token, deviceID string) (*userdomain.User, error)
+	// AuthenticateClaims is Authenticate plus the validated claim set (user,
+	// session, device). The WS gateway binds a socket to (user_id, session_id)
+	// from these claims (API.md §16.1) and enforces per-session revocation.
+	AuthenticateClaims(ctx context.Context, token, deviceID string) (*userdomain.User, *domain.AccessClaims, error)
 }
 
 // LoginCommand is the validated input for authentication (API.md §4.3).
