@@ -12,6 +12,8 @@ import (
 	"github.com/AkaneSakuramori/socialmedia/server/internal/chat/application"
 	chatdomain "github.com/AkaneSakuramori/socialmedia/server/internal/chat/domain"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/domain"
+	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/presence"
+	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/typing"
 )
 
 // wireError is the stable wire-level error vocabulary the handler sends in ack
@@ -82,6 +84,15 @@ type receiptPayload struct {
 	LastReadSeq    int64 `json:"last_read_seq"`
 }
 
+type typingPayload struct {
+	ConversationID int64 `json:"conversation_id"`
+}
+
+type presenceUpdatePayload struct {
+	Status       string `json:"status"`
+	CustomStatus string `json:"custom_status"`
+}
+
 // Handler processes inbound frames for connected sockets (the hub's
 // FrameHandler). It is thin: it decodes the frame's data, calls the chat
 // application service, and acks/errors. Fan-out is not its job — the dispatcher
@@ -91,12 +102,45 @@ type Handler struct {
 	chat application.Service
 	log  *slog.Logger
 	now  func() time.Time
-	// MaxGlobalSeqReadDelay is unused in v1; reserved for resume cursor checks.
+
+	// replay backs resume gap replay (API.md §16.6); nil → resume is always
+	// rejected (v1 behavior).
+	replay Replayer
+	// head reports the change_log head for resume_ack's global_seq; best-effort.
+	head HeadSource
+	// presence/typing drive the ephemeral realtime state; nil-safe for tests
+	// and for deployments where the services are not wired.
+	presence *presence.Service
+	typing   *typing.Service
 }
 
 // NewHandler builds the frame handler for the gateway.
 func NewHandler(chat application.Service, log *slog.Logger) *Handler {
 	return &Handler{chat: chat, log: log, now: time.Now}
+}
+
+// WithReplayer wires the resume replay source (shared with the dispatcher).
+func (h *Handler) WithReplayer(r Replayer) *Handler {
+	h.replay = r
+	return h
+}
+
+// WithHeadSource wires the change_log head source for resume_ack cursors.
+func (h *Handler) WithHeadSource(s HeadSource) *Handler {
+	h.head = s
+	return h
+}
+
+// WithPresence wires the ephemeral presence service (optional).
+func (h *Handler) WithPresence(p *presence.Service) *Handler {
+	h.presence = p
+	return h
+}
+
+// WithTyping wires the ephemeral typing service (optional).
+func (h *Handler) WithTyping(t *typing.Service) *Handler {
+	h.typing = t
+	return h
 }
 
 // HandleFrame dispatches one inbound frame (API.md §17). It returns an error
@@ -131,7 +175,7 @@ func (h *Handler) HandleFrame(ctx context.Context, c *Connection, frame *domain.
 	case domain.EventSubscribe:
 		return h.handleSubscribe(ctx, c, frame)
 	case domain.EventUnsubscribe:
-		return h.handleUnsubscribe(c, frame)
+		return h.handleUnsubscribe(ctx, c, frame)
 	case domain.EventMessageSend:
 		return h.handleMessageSend(ctx, c, frame)
 	case domain.EventMessageEdit:
@@ -146,10 +190,12 @@ func (h *Handler) HandleFrame(ctx context.Context, c *Connection, frame *domain.
 		return h.handleReceiptRead(ctx, c, frame)
 	case domain.EventReceiptDelivered:
 		return h.handleReceiptDelivered(ctx, c, frame)
-	case domain.EventTypingStart, domain.EventTypingStop, domain.EventPresenceUpdate:
-		// Deferred to M4 (ARCHITECTURE.md §17).
-		c.ack(frame.ID, map[string]any{"status": "not_supported"}, "NOT_SUPPORTED")
-		return nil
+	case domain.EventTypingStart:
+		return h.handleTyping(ctx, c, frame, "typing")
+	case domain.EventTypingStop:
+		return h.handleTyping(ctx, c, frame, "stopped")
+	case domain.EventPresenceUpdate:
+		return h.handlePresenceUpdate(ctx, c, frame)
 	case domain.EventAck:
 		// Client ack of S2C events (API.md §17.13); the dispatcher owns cursor
 		// advancement in the resume milestone.
@@ -159,21 +205,128 @@ func (h *Handler) HandleFrame(ctx context.Context, c *Connection, frame *domain.
 	}
 }
 
-// handleResume is the reconnect continuation (API.md §16.6/§17.2). v1 rejects
-// with cursor_too_old so the client runs the snapshot+delta bootstrap; the
-// replay path ships with the dispatcher milestone.
+// handleResume is the reconnect continuation (API.md §16.6/§17.2). It
+// validates the payload and the bound session, then replays the gap from the
+// dispatcher's replay buffer when the cursor is inside the replay window —
+// otherwise it rejects (resume_rejected) so the client falls back to full
+// resynchronization (snapshot + delta bootstrap, API.md §16.3).
 func (h *Handler) handleResume(ctx context.Context, c *Connection, frame *domain.Frame) error {
 	var p resumePayload
 	if err := decodeData(frame, &p); err != nil {
 		return err
 	}
-	if p.SessionID != 0 && p.SessionID != c.SessionID() {
-		return errors.New("realtime: resume session_id mismatch")
+	if p.LastSeq < 0 || p.LastGlobalSeq < 0 {
+		return errors.New("realtime: resume cursors must be non-negative")
 	}
-	c.sendEvent(domain.EventResumeRejected, map[string]any{
-		"reason": "cursor_too_old",
-	})
+	// Resume must continue the session the socket is bound to. A claimed
+	// session mismatch is a protocol/security violation: reject, never replay
+	// into the wrong session.
+	if p.SessionID != 0 && p.SessionID != c.SessionID() {
+		h.log.Warn("realtime: resume session mismatch",
+			"conn", c.ID(), "user", c.UserID(), "claimed", p.SessionID, "bound", c.SessionID())
+		c.sendEvent(domain.EventResumeRejected, map[string]any{"reason": "session_revoked"})
+		return nil
+	}
+	// The replay window must cover the whole gap; otherwise the client must
+	// resynchronize from the durable store (API.md §16.6: buffer TTL exceeded
+	// or cursor stale → resume_rejected).
+	if h.replay == nil || !h.replay.CanReplay(p.LastGlobalSeq) {
+		c.sendEvent(domain.EventResumeRejected, map[string]any{"reason": "buffer_expired"})
+		return nil
+	}
+	replay := h.replay.ReplaySince(p.LastGlobalSeq)
+	c.sendResumeAck(p.LastSeq, h.headGlobalSeq(ctx), replay)
 	return nil
+}
+
+// headGlobalSeq resolves the change_log head for resume_ack (best-effort; 0
+// when unavailable — the client reconciles with its own acked cursor).
+func (h *Handler) headGlobalSeq(ctx context.Context) int64 {
+	if h.head == nil {
+		return 0
+	}
+	if v, err := h.head.Head(ctx); err == nil {
+		return v
+	} else {
+		h.log.Debug("realtime: resume head unavailable", "error", err)
+	}
+	return 0
+}
+
+// handleTyping drives a typing.start / typing.stop (API.md §17.10). Membership
+// is re-verified so a non-member cannot inject typing indicators into a
+// conversation (WS-4 parity); the typing service throttles broadcasts per
+// (user, conversation) and expires state. Ephemeral — never persisted,
+// never replayed.
+func (h *Handler) handleTyping(ctx context.Context, c *Connection, frame *domain.Frame, status string) error {
+	var p typingPayload
+	if err := decodeData(frame, &p); err != nil {
+		return err
+	}
+	if p.ConversationID <= 0 {
+		return errors.New("realtime: typing missing conversation_id")
+	}
+	if h.typing == nil {
+		c.ack(frame.ID, map[string]any{"status": "ok"}, "")
+		return nil
+	}
+	// Only members may signal typing (bounded by the per-conversation frame
+	// budget, so the membership check cannot be turned into a read storm).
+	if _, err := h.chat.GetConversation(ctx, application.GetConversationCommand{
+		UserID:         c.UserID(),
+		ConversationID: p.ConversationID,
+	}); err != nil {
+		h.ackChatError(c, frame.ID, err)
+		return nil
+	}
+	ectx, cancel := h.ephemeralCtx(ctx)
+	defer cancel()
+	if status == "stopped" {
+		h.typing.Stop(ectx, c.UserID(), p.ConversationID)
+	} else {
+		h.typing.Start(ectx, c.UserID(), p.ConversationID)
+	}
+	c.ack(frame.ID, map[string]any{"status": "ok"}, "")
+	return nil
+}
+
+// handlePresenceUpdate applies a client presence.update (API.md §17.11). The
+// status vocabulary is enforced; last-seen is never client-claimed — it is
+// derived server-side from connection lifecycle.
+func (h *Handler) handlePresenceUpdate(ctx context.Context, c *Connection, frame *domain.Frame) error {
+	var p presenceUpdatePayload
+	if err := decodeData(frame, &p); err != nil {
+		return err
+	}
+	if p.Status == "" {
+		p.Status = "online"
+	}
+	if !validPresenceStatus(p.Status) {
+		h.ackError(c, frame.ID, wireError{Code: "VALIDATION_ERROR", Detail: "status must be online|offline|away|busy", Retryable: false})
+		return nil
+	}
+	if h.presence != nil {
+		ectx, cancel := h.ephemeralCtx(ctx)
+		defer cancel()
+		h.presence.Update(ectx, c.UserID(), p.Status, p.CustomStatus)
+	}
+	c.ack(frame.ID, map[string]any{"status": "ok"}, "")
+	return nil
+}
+
+// ephemeralCtx bounds presence/typing Redis calls so a degraded Redis cannot
+// block a connection's read pump indefinitely (Redis failure handling).
+func (h *Handler) ephemeralCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, 2*time.Second)
+}
+
+func validPresenceStatus(s string) bool {
+	switch s {
+	case "online", "offline", "away", "busy":
+		return true
+	default:
+		return false
+	}
 }
 
 // handleSubscribe registers the socket for a conversation's live fan-out after
@@ -200,6 +353,11 @@ func (h *Handler) handleSubscribe(ctx context.Context, c *Connection, frame *dom
 		}
 		c.Subscribe(convID)
 		subscribed = append(subscribed, convID)
+		if h.presence != nil {
+			ectx, cancel := h.ephemeralCtx(ctx)
+			h.presence.SetConversation(ectx, c.UserID(), convID)
+			cancel()
+		}
 	}
 	c.ack(frame.ID, map[string]any{"subscribed": subscribed}, "")
 	return nil
@@ -207,12 +365,17 @@ func (h *Handler) handleSubscribe(ctx context.Context, c *Connection, frame *dom
 
 // handleUnsubscribe leaves a conversation's fan-out (API.md §17.3). Unsubscribing
 // from a conversation never subscribed is a no-op success.
-func (h *Handler) handleUnsubscribe(c *Connection, frame *domain.Frame) error {
+func (h *Handler) handleUnsubscribe(ctx context.Context, c *Connection, frame *domain.Frame) error {
 	var p unsubscribePayload
 	if err := decodeData(frame, &p); err != nil {
 		return err
 	}
 	c.Unsubscribe(p.ConversationID)
+	if h.presence != nil {
+		ectx, cancel := h.ephemeralCtx(ctx)
+		h.presence.DropConversation(ectx, c.UserID(), p.ConversationID)
+		cancel()
+	}
 	c.ack(frame.ID, map[string]any{"unsubscribed": p.ConversationID}, "")
 	return nil
 }
@@ -397,13 +560,18 @@ func rateClass(frame *domain.Frame) (class, key string) {
 	switch frame.Type {
 	case domain.EventPing, domain.EventPong, domain.EventAck:
 		return "", ""
-	case domain.EventTypingStart, domain.EventTypingStop:
-		// ws_typing: 1 per 2 s per conversation.
+	case domain.EventTypingStart:
+		// ws_typing: 1 per 2 s per conversation. typing.stop is exempt: a stop
+		// is a corrective state-clear that must always land so indicators never
+		// stay stuck on (API.md §17.10: stop on send/blur, auto-expire covers a
+		// missed stop only as a fallback).
 		var p struct {
 			ConversationID int64 `json:"conversation_id"`
 		}
 		_ = json.Unmarshal(frame.Data, &p)
 		return "typing", strconv.FormatInt(p.ConversationID, 10)
+	case domain.EventTypingStop:
+		return "", ""
 	case domain.EventPresenceUpdate:
 		return "presence", "" // 1 per s per user
 	case domain.EventReceiptRead, domain.EventReceiptDelivered:

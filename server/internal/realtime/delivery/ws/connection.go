@@ -42,6 +42,11 @@ type Connection struct {
 	closeCode domain.CloseCode
 	closing   atomic.Bool
 
+	// onClose is invoked once after both pumps exit and the hub unregisters the
+	// connection. It carries lifecycle side effects (presence disconnect,
+	// typing cleanup) and must not block the teardown path.
+	onClose func()
+
 	// rate holds the per-connection WS frame budget enforcement (API.md §16.8,
 	// SECURITY_SPEC.md WS-3) and the sustained-abuse counter.
 	rate *connRate
@@ -106,6 +111,9 @@ func (c *Connection) Run(ctx context.Context) {
 	c.hub.unregister(c)
 	close(c.done)
 	c.ws.CloseNow()
+	if c.onClose != nil {
+		c.onClose()
+	}
 }
 
 // Close requests a graceful close with the given code; the write pump performs
@@ -193,6 +201,77 @@ func (c *Connection) ack(id string, result any, errCode string) {
 		data = map[string]any{"id": id, "error": map[string]any{"code": errCode}}
 	}
 	c.sendEvent(domain.EventServerAck, data)
+}
+
+// resumeAckReplay is one replayed frame embedded in resume_ack (API.md §18.2).
+type resumeAckReplay struct {
+	Type string          `json:"type"`
+	Seq  int64           `json:"seq"`
+	At   time.Time       `json:"at"`
+	Data json.RawMessage `json:"data,omitempty"`
+}
+
+// sendResumeAck emits resume_ack with the replay gap embedded (API.md §16.6/
+// §18.2). The replay frames are stamped with fresh per-connection seqs and the
+// whole batch (ack + replay) is enqueued atomically w.r.t. other S2C delivery
+// (held under seqMu), so no live frame can interleave between the ack and the
+// gap replay — the ordering guarantee the resume protocol needs. Returns false
+// when the frame was dropped (connection closing or slow consumer).
+func (c *Connection) sendResumeAck(fromSeq, globalSeq int64, replay []ReplayFrame) bool {
+	c.seqMu.Lock()
+	defer c.seqMu.Unlock()
+
+	// The resume_ack frame carries the first fresh seq; the embedded replay
+	// frames continue it contiguously so the client's per-connection seq never
+	// has a gap between the ack and the replayed frames.
+	c.seq++
+	ackSeq := c.seq
+	replayed := make([]resumeAckReplay, 0, len(replay))
+	for _, ev := range replay {
+		c.seq++
+		replayed = append(replayed, resumeAckReplay{
+			Type: ev.Type,
+			Seq:  c.seq,
+			At:   ev.At,
+			Data: ev.Data,
+		})
+	}
+	data, err := json.Marshal(map[string]any{
+		"connection_id": c.id,
+		"session_id":    c.sessionID,
+		"from_seq":      fromSeq,
+		"global_seq":    globalSeq,
+		"replay":        replayed,
+	})
+	if err != nil {
+		c.hub.log.Error("realtime: marshal resume_ack", "conn", c.id, "error", err)
+		return false
+	}
+	ack := domain.Frame{
+		Version: domain.ProtocolVersion,
+		ID:      "resume-" + c.id,
+		Type:    domain.EventResumeAck,
+		Seq:     &ackSeq,
+		At:      time.Now().UTC(),
+		Data:    data,
+	}
+	b, err := ack.Encode()
+	if err != nil {
+		c.hub.log.Error("realtime: encode resume_ack", "conn", c.id, "error", err)
+		return false
+	}
+	if c.isClosing() {
+		return false
+	}
+	select {
+	case c.send <- b:
+		return true
+	default:
+		c.hub.log.Warn("realtime: resume_ack dropped (slow consumer)", "conn", c.id, "user", c.userID)
+		c.closeWith(domain.CloseSlowConsumer)
+		c.drop()
+		return false
+	}
 }
 
 // readPump reads frames, applies the read limit, and forwards each frame to the

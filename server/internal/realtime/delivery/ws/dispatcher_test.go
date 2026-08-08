@@ -24,7 +24,7 @@ func newDispatcherTestHub(t *testing.T) (*Hub, *recordingHandler) {
 
 func TestDispatchConversationEventReachesSubscribers(t *testing.T) {
 	hub, h := newDispatcherTestHub(t)
-	d := NewDispatcher(hub, observability.NewLogger("test"))
+	d := NewDispatcher(hub, newReplayBuffer(DefaultReplayConfig()), observability.NewLogger("test"))
 
 	conv := int64(2001)
 	d.dispatch(&domain.Event{
@@ -61,7 +61,7 @@ func TestDispatchConversationEventReachesSubscribers(t *testing.T) {
 
 func TestDispatchReactionSplitsByPayload(t *testing.T) {
 	hub, _ := newDispatcherTestHub(t)
-	d := NewDispatcher(hub, observability.NewLogger("test"))
+	d := NewDispatcher(hub, newReplayBuffer(DefaultReplayConfig()), observability.NewLogger("test"))
 
 	conv := int64(2001)
 	d.dispatch(&domain.Event{
@@ -92,7 +92,7 @@ func TestDispatchReactionSplitsByPayload(t *testing.T) {
 
 func TestDispatchReplayBufferReplaysGap(t *testing.T) {
 	hub, _ := newDispatcherTestHub(t)
-	d := NewDispatcher(hub, observability.NewLogger("test"))
+	d := NewDispatcher(hub, newReplayBuffer(DefaultReplayConfig()), observability.NewLogger("test"))
 
 	conv := int64(2001)
 	for _, e := range []*domain.Event{

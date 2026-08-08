@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -14,7 +16,8 @@ import (
 
 // dispatcherChannel is the channel the relay publishes committed events to
 // (must match infra.Channel). It is redeclared here so the delivery layer has
-// no import cycle with infra; keep the two in sync.
+// no import cycle with infra; keep the two in sync. Ephemeral presence/typing
+// events are published to the same channel.
 const dispatcherChannel = "realtime:events"
 
 // Dispatcher consumes the log-dispatch event stream (ARCHITECTURE.md §13.1)
@@ -24,18 +27,23 @@ const dispatcherChannel = "realtime:events"
 // connections only (ENGINEERING.md §18.2/§18.3). Events carry a precomputed
 // fan-out target (affected_user_ids, DATABASE.md §7.1); the dispatcher routes
 // conversation-scoped events to subscribers and user-scoped events to the
-// affected users' sockets. Delivery is at-least-once; consumers dedupe.
+// affected users' sockets. Delivery is at-least-once; a bounded dedupe set
+// collapses redundant global_seqs.
 type Dispatcher struct {
 	hub *Hub
 	// replay is the per-conversation replay buffer for resume (API.md §16.6,
-	// ENGINEERING.md §18.3). Bounded and TTL'd; see replayBuffer.
+	// ENGINEERING.md §18.3). Bounded and TTL'd; see replayBuffer. It is shared
+	// with the frame handler so resume can replay the gap.
 	replay *replayBuffer
+	// dedupe collapses at-least-once duplicates by global_seq (bounded).
+	dedupe *dedupeSet
 	log    *slog.Logger
 }
 
-// NewDispatcher builds the dispatcher over a hub.
-func NewDispatcher(hub *Hub, log *slog.Logger) *Dispatcher {
-	return &Dispatcher{hub: hub, replay: newReplayBuffer(DefaultReplayConfig()), log: log}
+// NewDispatcher builds the dispatcher over a hub, sharing the given replay
+// buffer with the frame handler (the handler reads it on resume).
+func NewDispatcher(hub *Hub, replay *replayBuffer, log *slog.Logger) *Dispatcher {
+	return &Dispatcher{hub: hub, replay: replay, dedupe: newDedupeSet(4096), log: log}
 }
 
 // Run subscribes to the event stream and dispatches until ctx is cancelled.
@@ -64,11 +72,27 @@ func (d *Dispatcher) Run(ctx context.Context, client *redis.Client) error {
 	}
 }
 
-// dispatch routes one committed event to the hub. Conversation-scoped events
-// are fanned out to the conversation's subscribers; user-scoped events (and
-// conversation events) go to the affected users' sockets. The event is also
-// appended to the replay buffer so a reconnecting client can resume the gap.
+// dispatch routes one event to the hub. Conversation-scoped events are fanned
+// out to the conversation's subscribers; user-scoped events (and conversation
+// events) go to the affected users' sockets. Durable events are appended to
+// the replay buffer so a reconnecting client can resume the gap; ephemeral
+// presence/typing events never enter the replay buffer.
 func (d *Dispatcher) dispatch(e *domain.Event) {
+	// At-least-once dedupe by global_seq (relay restarts / retries).
+	if e.GlobalSeq > 0 && !d.dedupe.add(e.GlobalSeq) {
+		d.log.Debug("realtime: dispatcher duplicate dropped", "global_seq", e.GlobalSeq)
+		return
+	}
+
+	// Ephemeral events are routed to conversation subscribers and never
+	// replayed (ARCHITECTURE.md §16/§15: typing + presence are transient).
+	if domain.IsEphemeral(e.EventType) {
+		if e.ConversationID != nil {
+			d.hub.DeliverToConversation(*e.ConversationID, e.EventType, jsonPayload(e.Payload))
+		}
+		return
+	}
+
 	wireType := eventWireType(e)
 	if wireType == "" {
 		d.log.Warn("realtime: dispatcher unknown event type", "event_type", e.EventType, "global_seq", e.GlobalSeq)
@@ -140,8 +164,11 @@ func DefaultReplayConfig() ReplayConfig {
 // keyed by global_seq. It backs the resume protocol's replay of the gap since
 // the client's last_global_seq (API.md §16.6). A connection's per-connection
 // seq is stamped at delivery time by sendEvent; replay stamps fresh seqs so
-// the client sees a contiguous sequence after reconnection.
+// the client sees a contiguous sequence after reconnection. It is safe for
+// concurrent use: the dispatcher appends from its subscription goroutine while
+// the frame handler replays from a connection's read pump.
 type replayBuffer struct {
+	mu  sync.Mutex
 	cfg ReplayConfig
 	// events[convID] is a FIFO ring of (global_seq, wire type, payload).
 	events map[int64][]replayEvent
@@ -154,8 +181,36 @@ type replayEvent struct {
 	at      time.Time
 }
 
+// ReplayFrame is one event delivered to a resuming connection (fresh
+// per-connection seq, wire type, payload, original timestamp).
+type ReplayFrame struct {
+	Seq  int64
+	Type string
+	At   time.Time
+	Data json.RawMessage
+}
+
+// Replayer is the resume-time view of the replay buffer. The frame handler
+// consumes it; *replayBuffer implements it.
+type Replayer interface {
+	// CanReplay reports whether the buffer can replay the whole gap after
+	// lastGlobalSeq — i.e. no per-conversation ring evicted events the client
+	// is missing (buffer TTL exceeded or ring overflow).
+	CanReplay(lastGlobalSeq int64) bool
+	// ReplaySince returns the events with global_seq > lastGlobalSeq across
+	// every conversation, ordered by global_seq (resume replay, API.md §16.6).
+	ReplaySince(lastGlobalSeq int64) []ReplayFrame
+}
+
 func newReplayBuffer(cfg ReplayConfig) *replayBuffer {
 	return &replayBuffer{cfg: cfg, events: make(map[int64][]replayEvent)}
+}
+
+// NewReplayBuffer builds the shared resume replay buffer (exported for the
+// composition root, which shares one buffer between the dispatcher and the
+// frame handler).
+func NewReplayBuffer(cfg ReplayConfig) *replayBuffer {
+	return newReplayBuffer(cfg)
 }
 
 // append records an event for later replay (best-effort; expired entries are
@@ -169,6 +224,8 @@ func (b *replayBuffer) append(e *domain.Event) {
 	if wire == "" {
 		return
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	ring := b.events[conv]
 	now := time.Now()
 	// Prune expired entries and cap the ring.
@@ -186,6 +243,8 @@ func (b *replayBuffer) append(e *domain.Event) {
 
 // since returns the replayable events with global_seq > last, in order.
 func (b *replayBuffer) since(conv int64, last int64) []replayEvent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	out := make([]replayEvent, 0)
 	for _, ev := range b.events[conv] {
 		if ev.seq > last {
@@ -193,4 +252,74 @@ func (b *replayBuffer) since(conv int64, last int64) []replayEvent {
 		}
 	}
 	return out
+}
+
+// CanReplay reports whether every non-empty per-conversation ring can cover
+// the client's cursor. If any ring's oldest retained global_seq is newer than
+// last+1, events between last and the ring floor were evicted and the gap
+// cannot be replayed (API.md §16.6 → resume_rejected, buffer_expired).
+func (b *replayBuffer) CanReplay(lastGlobalSeq int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.events) == 0 {
+		return false
+	}
+	for _, ring := range b.events {
+		if len(ring) == 0 {
+			continue
+		}
+		if lastGlobalSeq+1 < ring[0].seq {
+			return false
+		}
+	}
+	return true
+}
+
+// ReplaySince collects every buffered event with global_seq > lastGlobalSeq
+// across all conversations, ordered by global_seq. The result is bounded by
+// the buffer's per-conversation caps.
+func (b *replayBuffer) ReplaySince(lastGlobalSeq int64) []ReplayFrame {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []ReplayFrame
+	for _, ring := range b.events {
+		for _, ev := range ring {
+			if ev.seq > lastGlobalSeq {
+				out = append(out, ReplayFrame{Seq: ev.seq, Type: ev.wire, At: ev.at, Data: json.RawMessage(ev.payload)})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out
+}
+
+// dedupeSet collapses at-least-once duplicates by global_seq. It is bounded
+// and FIFO: once full, the oldest seen seq is forgotten. Ephemeral events
+// (global_seq 0) are never deduped.
+type dedupeSet struct {
+	mu    sync.Mutex
+	seen  map[int64]struct{}
+	order []int64
+	max   int
+}
+
+func newDedupeSet(max int) *dedupeSet {
+	return &dedupeSet{seen: make(map[int64]struct{}), max: max}
+}
+
+// add records seq and reports whether it is new (true = first sighting).
+func (d *dedupeSet) add(seq int64) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.seen[seq]; ok {
+		return false
+	}
+	d.seen[seq] = struct{}{}
+	d.order = append(d.order, seq)
+	if len(d.order) > d.max {
+		old := d.order[0]
+		d.order = d.order[1:]
+		delete(d.seen, old)
+	}
+	return true
 }

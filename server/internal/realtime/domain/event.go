@@ -55,6 +55,19 @@ const EventMessageReaction = "message.reaction"
 // (wire type settings.updated, API.md §18.20).
 const EventUserUpdated = "user.updated"
 
+// Ephemeral event types carried on the backplane. Unlike change_log rows they
+// are never persisted and never replayed on resume (ARCHITECTURE.md §16:
+// typing is transient by design; presence is TTL'd). The dispatcher routes
+// them to conversation subscribers and skips the replay buffer. The wire
+// constants are declared in protocol.go (EventPresenceChanged, §18.12;
+// EventTypingIndicator, §18.11).
+
+// IsEphemeral reports whether an event type is transient realtime state
+// (never replayed, never part of change_log).
+func IsEphemeral(eventType string) bool {
+	return eventType == EventPresenceChanged || eventType == EventTypingIndicator
+}
+
 // Change-log event types used by the dispatcher's routing decision (the wire
 // fan-out targets are user sockets, not the conversation subscriber set).
 const (

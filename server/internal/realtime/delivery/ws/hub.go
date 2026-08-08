@@ -136,6 +136,18 @@ func (h *Hub) ConnCount() int {
 	return len(h.conns)
 }
 
+// OnlineUsers returns the user ids with at least one live local connection
+// (feeds the presence heartbeat sweeper).
+func (h *Hub) OnlineUsers() []int64 {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]int64, 0, len(h.byUser))
+	for uid := range h.byUser {
+		out = append(out, uid)
+	}
+	return out
+}
+
 // Subscribe registers the connection for a conversation's live fan-out. The
 // caller (frame handler) must already have verified membership — this method
 // is a pure registry update (WS-4: unauthorized subscribes denied upstream).

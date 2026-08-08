@@ -13,6 +13,8 @@ import (
 
 	authdomain "github.com/AkaneSakuramori/socialmedia/server/internal/auth/domain"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/domain"
+	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/presence"
+	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/typing"
 	userdomain "github.com/AkaneSakuramori/socialmedia/server/internal/user/domain"
 )
 
@@ -48,6 +50,10 @@ type Endpoint struct {
 	// OriginPatterns is the allowed CORS origins for cross-origin sockets;
 	// empty allows the request's own host (websocket.Accept default).
 	OriginPatterns []string
+
+	// presence/typing drive the ephemeral connection lifecycle (optional).
+	presence *presence.Service
+	typing   *typing.Service
 }
 
 // NewEndpoint builds the WS gateway endpoint.
@@ -59,6 +65,18 @@ func NewEndpoint(hub *Hub, auth ClaimsAuthenticator, head HeadSource, log *slog.
 		log:              log,
 		HandshakeTimeout: 10 * time.Second,
 	}
+}
+
+// WithPresence wires the ephemeral presence service (connection lifecycle).
+func (e *Endpoint) WithPresence(p *presence.Service) *Endpoint {
+	e.presence = p
+	return e
+}
+
+// WithTyping wires the ephemeral typing service (disconnect cleanup).
+func (e *Endpoint) WithTyping(t *typing.Service) *Endpoint {
+	e.typing = t
+	return e
 }
 
 // ServeHTTP performs the upgrade, authenticates, binds the connection, sends
@@ -96,6 +114,25 @@ func (e *Endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	conn := newConnection(e.hub.NextConnID(), claims.UserID, claims.SessionID, claims.DeviceID, ws, e.hub)
 	e.hub.register(conn)
+
+	// Connection lifecycle: register presence (online) and bind disconnect
+	// cleanup (presence offline + typing cleanup) to the connection teardown.
+	if e.presence != nil {
+		uid, cid := conn.UserID(), conn.ID()
+		ectx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		e.presence.Connect(ectx, uid, cid)
+		cancel()
+		conn.onClose = func() {
+			ectx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			offline := e.presence.Disconnect(ectx, uid, cid)
+			// Typing state is per user: only clear it once every connection is
+			// gone, so another live device's typing survives a single disconnect.
+			if offline && e.typing != nil {
+				e.typing.CleanupUser(ectx, uid)
+			}
+		}
+	}
 
 	conn.sendEvent(domain.EventHelloAck, map[string]any{
 		"connection_id": conn.ID(),

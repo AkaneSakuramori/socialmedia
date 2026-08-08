@@ -15,7 +15,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/AkaneSakuramori/socialmedia/server/config"
 	authapp "github.com/AkaneSakuramori/socialmedia/server/internal/auth/application"
@@ -35,6 +37,8 @@ import (
 	"github.com/AkaneSakuramori/socialmedia/server/internal/platform/redis"
 	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/delivery/ws"
 	realtimeinfra "github.com/AkaneSakuramori/socialmedia/server/internal/realtime/infra"
+	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/presence"
+	"github.com/AkaneSakuramori/socialmedia/server/internal/realtime/typing"
 	"github.com/AkaneSakuramori/socialmedia/server/pkg/clock"
 )
 
@@ -158,15 +162,34 @@ func Run(ctx context.Context) error {
 	// socket, binds it to (user_id, session_id), and drives C2S ops via the chat
 	// service. Fan-out is log-dispatch: the outbox relay publishes committed
 	// change_log rows to Redis; the dispatcher routes them to local sockets
-	// (ARCHITECTURE.md §13.1).
+	// (ARCHITECTURE.md §13.1). Presence and typing ride the same backplane as
+	// ephemeral events (ARCHITECTURE.md §15/§16).
 	changeLogRepo := chatpostgres.NewChangeLogRepo(pool)
-	wsHub := ws.NewHub(ws.DefaultConfig(), ws.NewHandler(chatSvc, log), log)
-	wsEndpoint := ws.NewEndpoint(wsHub, authSvc, changeLogRepo, log)
+	replayBuf := ws.NewReplayBuffer(ws.DefaultReplayConfig())
+
+	pub := realtimeinfra.NewRedisPublisher(redisClient)
+	presenceCfg := presence.DefaultConfig()
+	presenceCfg.Instance = instanceID(cfg)
+	presenceStore := presence.NewRedisStore(redisClient, presenceCfg)
+	presenceSvc := presence.NewService(presenceStore, presenceCfg, ws.NewPresenceNotifier(pub, log), log)
+	typingStore := typing.NewRedisStore(redisClient, typing.DefaultConfig())
+	typingSvc := typing.NewService(typingStore, typing.DefaultConfig(), ws.NewTypingNotifier(pub, log), log)
+
+	wsHub := ws.NewHub(ws.DefaultConfig(),
+		ws.NewHandler(chatSvc, log).
+			WithReplayer(replayBuf).
+			WithHeadSource(changeLogRepo).
+			WithPresence(presenceSvc).
+			WithTyping(typingSvc),
+		log)
+	wsEndpoint := ws.NewEndpoint(wsHub, authSvc, changeLogRepo, log).
+		WithPresence(presenceSvc).
+		WithTyping(typingSvc)
 	revokeWatcher := ws.NewSessionRevokeWatcher(wsHub, log)
-	wsDispatcher := ws.NewDispatcher(wsHub, log)
+	wsDispatcher := ws.NewDispatcher(wsHub, replayBuf, log)
 	wsRelay := realtimeinfra.NewRelay(
 		changeLogRepo,
-		realtimeinfra.NewRedisPublisher(redisClient),
+		pub,
 		realtimeinfra.DefaultRelayConfig(),
 		log,
 	)
@@ -179,28 +202,36 @@ func Run(ctx context.Context) error {
 
 	// Session-revoke watcher: force-closes sockets bound to a revoked session
 	// (API.md §18.19, code 4403). Best-effort; a missed signal is caught by the
-	// next gateway token check.
+	// next gateway token check. Supervised: an unexpected exit (e.g. a Redis
+	// backplane blip that closed the subscription) is restarted with backoff.
 	wctx, stopWatchers := context.WithCancel(context.Background())
 	defer stopWatchers()
-	go func() {
-		if err := revokeWatcher.Run(wctx, redisClient); err != nil {
-			log.Error("realtime: session-revoke watcher stopped", "error", err)
-		}
-	}()
+	go supervise(wctx, log, "session-revoke watcher", func(ctx context.Context) error {
+		return revokeWatcher.Run(ctx, redisClient)
+	})
 
 	// Outbox relay + dispatcher: move committed change_log rows onto the Redis
 	// backplane and route them to local sockets. The relay starts at the current
 	// change_log head; pre-existing history is not re-published (sync backfills).
+	// The dispatcher is supervised so a dropped subscription self-heals.
 	go func() {
 		if err := wsRelay.Run(wctx); err != nil {
 			log.Error("realtime: outbox relay stopped", "error", err)
 		}
 	}()
-	go func() {
-		if err := wsDispatcher.Run(wctx, redisClient); err != nil {
-			log.Error("realtime: dispatcher stopped", "error", err)
-		}
-	}()
+	go supervise(wctx, log, "dispatcher", func(ctx context.Context) error {
+		return wsDispatcher.Run(ctx, redisClient)
+	})
+
+	// Presence heartbeat sweeper: extends the presence TTL for every user with
+	// live local connections (heartbeat-based presence expiration).
+	if presenceSvc != nil {
+		go func() {
+			if err := presence.NewSweeper(presenceStore, wsHub, presenceCfg, log).Run(wctx); err != nil {
+				log.Error("realtime: presence sweeper stopped", "error", err)
+			}
+		}()
+	}
 
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -235,6 +266,43 @@ func Run(ctx context.Context) error {
 	// Defers close Redis, then the pool, in reverse order.
 	log.Info("api-server stopped cleanly")
 	return nil
+}
+
+// instanceID derives a stable per-process identity for the presence
+// aggregation keys (multi-instance presence, ARCHITECTURE.md §15). Distinct
+// processes must not share an id: node id where configured, hostname otherwise.
+func instanceID(cfg config.Config) string {
+	if cfg.IDGenNodeID != 0 {
+		return "node-" + strconv.Itoa(cfg.IDGenNodeID)
+	}
+	if host, err := os.Hostname(); err == nil && host != "" {
+		return host
+	}
+	return "default"
+}
+
+// supervise runs fn as a long-lived worker and restarts it with bounded
+// backoff when it exits unexpectedly (dispatcher failure handling, §37.4). It
+// returns when ctx is cancelled; a worker that exits without error on ctx
+// cancellation is not restarted.
+func supervise(ctx context.Context, log *slog.Logger, name string, fn func(context.Context) error) {
+	backoff := 250 * time.Millisecond
+	for {
+		err := fn(ctx)
+		if err == nil {
+			return
+		}
+		log.Error("realtime: worker exited, restarting", "name", name, "error", err, "backoff", backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > 5*time.Second {
+			backoff = 5 * time.Second
+		}
+	}
 }
 
 // loadTokenFactory builds the JWT signer/verifier. In dev with no configured
