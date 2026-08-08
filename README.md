@@ -4,7 +4,7 @@
 
 InChat is a social media and messaging platform designed and engineered for India first — from the ground up. It pairs a modern, offline-first Flutter app with a high-performance Go backend, built to deliver fast, reliable messaging on the real-world devices and networks that India runs on.
 
-> **Status:** Design finalized · Go backend foundation (Sprint 0) shipped · Sprint 1 shipped (registration, login + lockout, refresh rotation with reuse detection, device/session management with logout, account security & recovery — forgot/reset/change password, verified email/phone change, soft delete + restore, login history, audit log) · Sprint 2 in progress (conversations & messaging shipped; realtime WebSocket gateway landed).
+> **Status:** Design finalized · Go backend foundation (Sprint 0) shipped · Sprint 1 shipped (registration, login + lockout, refresh rotation with reuse detection, device/session management with logout, account security & recovery — forgot/reset/change password, verified email/phone change, soft delete + restore, login history, audit log) · Sprint 2 shipped (conversations & messaging, then the realtime WebSocket gateway with outbox relay and dispatcher).
 >
 > This repository is the **single source of truth for InChat**: the engineering documentation (architecture, database, API, backend and Flutter engineering guides, DevOps, quality/release, and security standards) plus the **Go backend** implementation under `server/`.
 

@@ -6,6 +6,43 @@ versioning follows [SemVer](https://semver.org/). Newest entries appear first.
 
 ## [Unreleased]
 
+### Sprint 2 - Core Messaging (milestone 3: realtime WebSocket gateway, outbox relay, and dispatcher)
+
+#### Added
+- **`realtime/domain`** - protocol contract (frame envelope, C2S/S2C event
+  vocabulary, close codes 4401/4403/4501/4502/4510/1012/1008, wire decode
+  validation) and the log-dispatch `Event` envelope with change_log → wire
+  type mapping.
+- **WebSocket gateway (`realtime/delivery/ws`)** - stateless `Hub` with
+  per-connection read/write pumps, bounded 256-frame send buffers, server
+  ping heartbeat (~25s, drop after one missed pong), slow-consumer drop
+  (4510), and graceful-close drain so pre-close acks are flushed.
+- **Handshake & binding** - `GET /v1/ws` endpoint: subprotocol-negotiated
+  upgrade, mandatory first `hello` frame (query `access_token` takes
+  precedence), `AuthenticateClaims` validation, socket binding to
+  `(user_id, session_id, device_id)`, single `hello_ack` with the change_log
+  head cursor.
+- **C2S frame dispatch** - subscribe/unsubscribe (membership-verified),
+  message send/edit/delete, reaction add/remove, receipt read/delivered,
+  ping/pong, resume (v1 `resume_rejected`), and typing/presence deferred to
+  M4. Business errors are acked without closing the socket; protocol
+  violations close with 4502.
+- **Per-frame rate limiting** - token-bucket WS budgets (typing 1/2s per
+  conversation, presence 1/s, read 1/500ms, per-connection standard tier);
+  breaches ack `RATE_LIMITED`, sustained abuse closes with 4501.
+- **Outbox relay (`realtime/infra`)** - polls `change_log` after the current
+  head via `ListAfter` keyset reads and publishes committed rows to the
+  `realtime:events` Redis pub/sub channel; at-least-once, transient errors
+  retried, never fatal.
+- **Dispatcher** - subscribes to the backplane and fans events out through
+  the local Hub (conversation events to subscribers; receipts/membership/
+  settings to affected sockets), plus a bounded TTL'd per-conversation replay
+  buffer backing the resume protocol.
+- **Session revocation** - Redis `sessions:revoke` watcher force-closes
+  sockets of a revoked session with 4403; wired into the composition root.
+- **`ChangeLogRepository.ListAfter`** - keyset read (PG + fakes) for the
+  relay and future sync delta.
+
 ### Sprint 2 - Core Messaging (milestone 2: message domain, persistence, receipts, and reactions)
 
 #### Added
