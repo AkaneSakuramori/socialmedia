@@ -42,3 +42,15 @@ type Tx interface {
 type Beginner interface {
 	Begin(context.Context) (Tx, error)
 }
+
+// Querier is the read surface shared by a transaction (Tx) and the connection
+// pool (*pgxpool.Pool satisfies it structurally). Repositories accept a
+// Querier so fan-out reads can run inside the write transaction instead of
+// acquiring a second pool connection — holding a transaction open while taking
+// an extra connection can deadlock a bounded pool (circular wait: the tx holds
+// row locks the queued writers need, while it waits for a connection they
+// hold).
+type Querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) Row
+	Query(ctx context.Context, sql string, args ...any) (Rows, error)
+}

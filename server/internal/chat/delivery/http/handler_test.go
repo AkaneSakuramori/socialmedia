@@ -64,6 +64,46 @@ type fakeService struct {
 	archiveRes *application.ArchiveResult
 	archiveErr error
 	archiveCmd application.SetArchiveCommand
+
+	sendRes *application.SendMessageResult
+	sendErr error
+	sendCmd application.SendMessageCommand
+
+	listMessagesRes *application.MessageListResult
+	listMessagesErr error
+	listMessagesCmd application.ListMessagesCommand
+
+	getMessageRes *application.MessageView
+	getMessageErr error
+	getMessageCmd application.GetMessageCommand
+
+	editMessageRes *application.MessageView
+	editMessageErr error
+	editMessageCmd application.EditMessageCommand
+
+	deleteMessageRes *application.DeleteMessageResult
+	deleteMessageErr error
+	deleteMessageCmd application.DeleteMessageCommand
+
+	addReactionRes *application.ReactionResult
+	addReactionErr error
+	addReactionCmd application.ReactionCommand
+
+	removeReactionRes *application.ReactionResult
+	removeReactionErr error
+	removeReactionCmd application.ReactionCommand
+
+	listReactionsRes *application.ReactionsResult
+	listReactionsErr error
+	listReactionsCmd application.ListReactionsCommand
+
+	markReadRes *application.ReceiptResult
+	markReadErr error
+	markReadCmd application.MarkReadCommand
+
+	getReceiptsRes *application.ReceiptsResult
+	getReceiptsErr error
+	getReceiptsCmd application.GetReceiptsCommand
 }
 
 func (f *fakeService) CreateConversation(_ context.Context, cmd application.CreateConversationCommand) (*application.CreateConversationResult, error) {
@@ -110,6 +150,46 @@ func (f *fakeService) SetPin(_ context.Context, cmd application.SetPinCommand) (
 func (f *fakeService) SetArchive(_ context.Context, cmd application.SetArchiveCommand) (*application.ArchiveResult, error) {
 	f.archiveCmd = cmd
 	return f.archiveRes, f.archiveErr
+}
+func (f *fakeService) SendMessage(_ context.Context, cmd application.SendMessageCommand) (*application.SendMessageResult, error) {
+	f.sendCmd = cmd
+	return f.sendRes, f.sendErr
+}
+func (f *fakeService) ListMessages(_ context.Context, cmd application.ListMessagesCommand) (*application.MessageListResult, error) {
+	f.listMessagesCmd = cmd
+	return f.listMessagesRes, f.listMessagesErr
+}
+func (f *fakeService) GetMessage(_ context.Context, cmd application.GetMessageCommand) (*application.MessageView, error) {
+	f.getMessageCmd = cmd
+	return f.getMessageRes, f.getMessageErr
+}
+func (f *fakeService) EditMessage(_ context.Context, cmd application.EditMessageCommand) (*application.MessageView, error) {
+	f.editMessageCmd = cmd
+	return f.editMessageRes, f.editMessageErr
+}
+func (f *fakeService) DeleteMessage(_ context.Context, cmd application.DeleteMessageCommand) (*application.DeleteMessageResult, error) {
+	f.deleteMessageCmd = cmd
+	return f.deleteMessageRes, f.deleteMessageErr
+}
+func (f *fakeService) AddReaction(_ context.Context, cmd application.ReactionCommand) (*application.ReactionResult, error) {
+	f.addReactionCmd = cmd
+	return f.addReactionRes, f.addReactionErr
+}
+func (f *fakeService) RemoveReaction(_ context.Context, cmd application.ReactionCommand) (*application.ReactionResult, error) {
+	f.removeReactionCmd = cmd
+	return f.removeReactionRes, f.removeReactionErr
+}
+func (f *fakeService) ListReactions(_ context.Context, cmd application.ListReactionsCommand) (*application.ReactionsResult, error) {
+	f.listReactionsCmd = cmd
+	return f.listReactionsRes, f.listReactionsErr
+}
+func (f *fakeService) MarkRead(_ context.Context, cmd application.MarkReadCommand) (*application.ReceiptResult, error) {
+	f.markReadCmd = cmd
+	return f.markReadRes, f.markReadErr
+}
+func (f *fakeService) GetReceipts(_ context.Context, cmd application.GetReceiptsCommand) (*application.ReceiptsResult, error) {
+	f.getReceiptsCmd = cmd
+	return f.getReceiptsRes, f.getReceiptsErr
 }
 
 // fakeAuth authenticates every token to user 42.

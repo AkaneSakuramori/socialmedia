@@ -37,6 +37,7 @@ const (
 	// Chat/domain codes (API.md Appendix A).
 	CodeUserNotFound         Code = "USER_NOT_FOUND"
 	CodeConversationNotFound Code = "CONVERSATION_NOT_FOUND"
+	CodeMessageNotFound      Code = "MESSAGE_NOT_FOUND"
 	CodeBlocked              Code = "BLOCKED"
 	CodeNotAMember           Code = "NOT_A_MEMBER"
 	CodeInsufficientRole     Code = "INSUFFICIENT_ROLE"
@@ -69,6 +70,7 @@ var metaByCode = map[Code]codeMeta{
 
 	CodeUserNotFound:         {status: http.StatusNotFound, title: "User Not Found"},
 	CodeConversationNotFound: {status: http.StatusNotFound, title: "Conversation Not Found"},
+	CodeMessageNotFound:      {status: http.StatusNotFound, title: "Message Not Found"},
 	CodeBlocked:              {status: http.StatusForbidden, title: "Blocked"},
 	CodeNotAMember:           {status: http.StatusForbidden, title: "Not A Member"},
 	CodeInsufficientRole:     {status: http.StatusForbidden, title: "Insufficient Role"},
@@ -195,6 +197,11 @@ func UserNotFound(detail string) *Error {
 // ConversationNotFound reports a missing conversation (404).
 func ConversationNotFound(detail string) *Error {
 	return &Error{Code: CodeConversationNotFound, Detail: detail}
+}
+
+// MessageNotFound reports a missing message (API.md Appendix A MESSAGE_NOT_FOUND).
+func MessageNotFound(detail string) *Error {
+	return &Error{Code: CodeMessageNotFound, Detail: detail}
 }
 
 // Blocked reports that the target user blocked the caller (403).

@@ -104,7 +104,7 @@ func (s *service) AddMembers(ctx context.Context, cmd AddMembersCommand) (*AddMe
 		return nil, domain.ErrInsufficientRole
 	}
 
-	existing, err := s.deps.Memberships.ActiveUserIDs(ctx, c.ID)
+	existing, err := s.deps.Memberships.ActiveUserIDs(ctx, s.deps.DB, c.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (s *service) AddMembers(ctx context.Context, cmd AddMembersCommand) (*AddMe
 	}
 
 	// Resolve which targets are real users.
-	users, err := s.deps.Users.ListByIDs(ctx, cmd.UserIDs)
+	users, err := s.deps.Users.ListByIDs(ctx, s.deps.DB, cmd.UserIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +249,7 @@ func (s *service) RemoveMember(ctx context.Context, cmd RemoveMemberCommand) err
 		}
 	}
 
-	affected, err := s.deps.Memberships.ActiveUserIDs(ctx, c.ID)
+	affected, err := s.deps.Memberships.ActiveUserIDs(ctx, dbtx, c.ID)
 	if err != nil {
 		return err
 	}
@@ -335,7 +335,7 @@ func (s *service) ChangeMemberRole(ctx context.Context, cmd ChangeMemberRoleComm
 		return nil, makeErr(err, "chat: update member role")
 	}
 
-	affected, err := s.deps.Memberships.ActiveUserIDs(ctx, c.ID)
+	affected, err := s.deps.Memberships.ActiveUserIDs(ctx, dbtx, c.ID)
 	if err != nil {
 		return nil, err
 	}

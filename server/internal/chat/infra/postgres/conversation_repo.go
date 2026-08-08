@@ -113,6 +113,24 @@ func (r *ConversationRepo) Tombstone(ctx context.Context, dbtx tx.Tx, id int64, 
 	return nil
 }
 
+// BumpLastMessage advances the denormalized last_message_* columns
+// monotonically. The guard (`last_message_seq < seq`) makes out-of-order
+// commits harmless: if a newer message's transaction commits first, a later
+// older-sequence commit is a no-op, so the chat list never regresses and the
+// snippet always matches the highest committed sequence.
+func (r *ConversationRepo) BumpLastMessage(ctx context.Context, dbtx tx.Tx, id, seq int64, snippet *string, senderID *int64, at time.Time) (bool, error) {
+	ct, err := dbtx.Exec(ctx, `
+		UPDATE conversations
+		SET last_message_at = $2, last_message_seq = $3,
+		    last_message_snippet = $4, last_sender_id = $5, updated_at = $2
+		WHERE id = $1 AND (last_message_seq IS NULL OR last_message_seq < $3)`,
+		id, at, seq, snippet, senderID)
+	if err != nil {
+		return false, fmt.Errorf("chat: bump last message: %w", err)
+	}
+	return ct == 1, nil
+}
+
 // List returns the caller's chat list (API.md §7.1) with its per-user
 // membership state, keyset-paginated on COALESCE(last_message_at, created_at)
 // DESC, id DESC. For direct chats it also returns the counterpart's user id so

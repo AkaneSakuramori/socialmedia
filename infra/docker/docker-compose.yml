@@ -51,6 +51,10 @@ services:
       APP_PG_DSN: postgres://app:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
       APP_PG_MAX_CONNS: "10"
       APP_REDIS_ADDR: redis:6379
+      # Dev E2E override: when set (base64 Ed25519 seed), tokens minted in the
+      # same module sign with this key and the container verifies them. Empty in
+      # normal dev → the ephemeral-key fallback is unchanged.
+      APP_JWT_PRIVATE_KEY: ${APP_JWT_PRIVATE_KEY}
     ports:
       - "8080:8080"
     depends_on:

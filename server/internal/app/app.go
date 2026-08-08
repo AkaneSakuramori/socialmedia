@@ -135,14 +135,18 @@ func Run(ctx context.Context) error {
 	})
 
 	chatSvc := chatapp.New(chatapp.Deps{
-		Conversations: chatpostgres.NewConversationRepo(pool),
-		Memberships:   chatpostgres.NewMembershipRepo(pool),
-		Sequences:     chatpostgres.NewSequenceRepo(),
-		ChangeLog:     chatpostgres.NewChangeLogRepo(pool),
-		Users:         userRepo,
-		IDs:           ids,
-		TxBeginner:    beginner,
-		Clock:         clk,
+		Conversations:  chatpostgres.NewConversationRepo(pool),
+		Memberships:    chatpostgres.NewMembershipRepo(pool),
+		Sequences:      chatpostgres.NewSequenceRepo(),
+		Messages:       chatpostgres.NewMessageRepo(pool),
+		Reactions:      chatpostgres.NewReactionRepo(pool),
+		SequenceSource: chatpostgres.NewSequenceSource(pool, redisClient),
+		ChangeLog:      chatpostgres.NewChangeLogRepo(pool),
+		Users:          userRepo,
+		IDs:            ids,
+		TxBeginner:     beginner,
+		Clock:          clk,
+		DB:             postgres.NewQuerier(pool),
 	})
 
 	chatRoutes := chathttp.New(chatSvc, authSvc, redisClient)

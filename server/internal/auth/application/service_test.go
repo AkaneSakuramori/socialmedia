@@ -121,7 +121,7 @@ func (r *fakeUserRepo) FindByID(_ context.Context, id int64) (*userdomain.User, 
 	}
 	return nil, userdomain.ErrUserNotFound
 }
-func (r *fakeUserRepo) ListByIDs(_ context.Context, ids []int64) ([]userdomain.User, error) {
+func (r *fakeUserRepo) ListByIDs(_ context.Context, _ tx.Querier, ids []int64) ([]userdomain.User, error) {
 	var out []userdomain.User
 	for _, id := range ids {
 		if u, ok := r.byID[id]; ok && u.AccountState != userdomain.AccountDeleted {

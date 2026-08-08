@@ -50,11 +50,11 @@ func (r *UserRepo) FindByID(ctx context.Context, id int64) (*userdomain.User, er
 
 // ListByIDs loads the live users with the given ids, omitting unknown or
 // deleted accounts (used for bulk display-name resolution by the chat module).
-func (r *UserRepo) ListByIDs(ctx context.Context, ids []int64) ([]userdomain.User, error) {
+func (r *UserRepo) ListByIDs(ctx context.Context, q tx.Querier, ids []int64) ([]userdomain.User, error) {
 	if len(ids) == 0 {
 		return []userdomain.User{}, nil
 	}
-	rows, err := r.pool.Query(ctx,
+	rows, err := q.Query(ctx,
 		`SELECT `+userColumns+` FROM users
 		 WHERE id = ANY($1) AND account_state <> 'deleted'`, ids)
 	if err != nil {

@@ -50,6 +50,45 @@ var (
 	// ErrInvalidCursor means a pagination cursor failed decoding or validation
 	// (API.md §2.6; delivered as a field-level 422).
 	ErrInvalidCursor = errors.New("chat: invalid pagination cursor")
+	// ErrInvalidMessageType means the wire type is not one of API.md §8.1.
+	ErrInvalidMessageType = errors.New("chat: invalid message type")
+	// ErrMessageContentRequired means a text message has no content and a media
+	// message has no attachment envelope (API.md §8.2 "exactly one of").
+	ErrMessageContentRequired = errors.New("chat: message requires content or media")
+	// ErrMessageMediaLimit means a media message exceeded maxMediaPerMessage.
+	ErrMessageMediaLimit = errors.New("chat: too many media attachments")
+	// ErrMessageNotFound means no message matches the query (API.md Appendix A
+	// MESSAGE_NOT_FOUND, 404).
+	ErrMessageNotFound = errors.New("chat: message not found")
+	// ErrNotSender means the caller is not the message's sender for an edit or
+	// delete (API.md §8.4/§8.5, 403).
+	ErrNotSender = errors.New("chat: caller is not the message sender")
+	// ErrEditWindowExpired means the edit window has passed (API.md §8.4, 403).
+	ErrEditWindowExpired = errors.New("chat: edit window expired")
+	// ErrMessageDeleted means the target message is a tombstone and cannot be
+	// edited or reacted to (API.md §8.4/§8.6).
+	ErrMessageDeleted = errors.New("chat: message is deleted")
+	// ErrMessageNotEditable means an edit was attempted on a non-text field
+	// (type/media cannot change, API.md §8.4).
+	ErrMessageNotEditable = errors.New("chat: message is not editable")
+	// ErrReplyNotFound means reply_to_seq references a message that does not
+	// exist in the conversation (API.md §8.2).
+	ErrReplyNotFound = errors.New("chat: reply target not found")
+	// ErrMentionNotMember means a mention targets a non-member (API.md §8.2).
+	ErrMentionNotMember = errors.New("chat: mention is not a conversation member")
+	// ErrInvalidEmoji means the reaction emoji is missing or malformed
+	// (API.md §8.6).
+	ErrInvalidEmoji = errors.New("chat: invalid reaction emoji")
+	// ErrReactionLimit means a message already has 20 distinct emoji
+	// (API.md §8.6: "max 20 distinct emoji per message").
+	ErrReactionLimit = errors.New("chat: reaction limit reached")
+	// ErrSequenceConflict means a sequence collision was detected against the
+	// composite PK (DATABASE.md §11 final guard); the caller retries with the
+	// next sequence.
+	ErrSequenceConflict = errors.New("chat: sequence conflict, retry")
+	// ErrClientMsgIDConflict means the client_msg_id dedupe fired but the
+	// original row could not be resolved — a corruption-level inconsistency.
+	ErrClientMsgIDConflict = errors.New("chat: duplicate client_msg_id without original")
 )
 
 // ValidationError is a field-level validation failure (API.md §2.5 errors[]).

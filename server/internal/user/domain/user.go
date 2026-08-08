@@ -57,8 +57,10 @@ type UserRepository interface {
 	// ListByIDs loads the live (non-deleted) users with the given ids. Unknown
 	// ids are silently omitted; the caller decides whether that is an error.
 	// Used by the chat module to resolve participant display names in bulk
-	// (direct titles, group member previews).
-	ListByIDs(ctx context.Context, ids []int64) ([]User, error)
+	// (direct titles, group member previews). The querier is the caller's
+	// transaction when one is open (outbox fan-out) — never take a second pool
+	// connection while holding a write tx.
+	ListByIDs(ctx context.Context, q tx.Querier, ids []int64) ([]User, error)
 	// FindByPhone loads an account by normalized E.164 phone.
 	FindByPhone(ctx context.Context, phone string) (*User, error)
 	// FindByEmail loads an account by normalized lowercase email.

@@ -42,7 +42,10 @@ func TestMain(m *testing.M) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if p, err := platformpg.Open(ctx, dsn, 1); err == nil {
+		_, _ = p.Exec(ctx, `DELETE FROM message_reactions WHERE message_id IN (SELECT id FROM messages WHERE conversation_id >= 7000000)`)
+		_, _ = p.Exec(ctx, `DELETE FROM message_edits WHERE message_id IN (SELECT id FROM messages WHERE conversation_id >= 7000000)`)
 		_, _ = p.Exec(ctx, `DELETE FROM change_log WHERE conversation_id >= 7000000 OR actor_user_id >= 9000000`)
+		_, _ = p.Exec(ctx, `DELETE FROM messages WHERE conversation_id >= 7000000`)
 		_, _ = p.Exec(ctx, `DELETE FROM conversation_members WHERE conversation_id >= 7000000`)
 		_, _ = p.Exec(ctx, `DELETE FROM conversation_sequences WHERE conversation_id >= 7000000`)
 		_, _ = p.Exec(ctx, `DELETE FROM conversations WHERE id >= 7000000`)
@@ -485,7 +488,7 @@ func TestIntegMembershipLifecycle(t *testing.T) {
 		t.Errorf("CountActive = %d, %v; want 3", n, err)
 	}
 
-	ids, err := repo.ActiveUserIDs(context.Background(), convID)
+	ids, err := repo.ActiveUserIDs(context.Background(), platformpg.NewQuerier(p), convID)
 	if err != nil || len(ids) != 3 {
 		t.Errorf("ActiveUserIDs = %v, %v; want 3 users", ids, err)
 	}

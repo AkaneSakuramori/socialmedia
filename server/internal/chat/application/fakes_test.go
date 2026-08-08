@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -106,7 +107,7 @@ func (r *fakeUserRepo) FindByID(_ context.Context, id int64) (*userdomain.User, 
 	return &cp, nil
 }
 
-func (r *fakeUserRepo) ListByIDs(_ context.Context, ids []int64) ([]userdomain.User, error) {
+func (r *fakeUserRepo) ListByIDs(_ context.Context, _ tx.Querier, ids []int64) ([]userdomain.User, error) {
 	var out []userdomain.User
 	for _, id := range ids {
 		u, ok := r.byID[id]
@@ -204,6 +205,22 @@ func (r *fakeConversationRepo) Tombstone(_ context.Context, _ tx.Tx, id int64, a
 		c.DeletedAt = &at
 	}
 	return nil
+}
+
+func (r *fakeConversationRepo) BumpLastMessage(_ context.Context, _ tx.Tx, id, seq int64, snippet *string, senderID *int64, at time.Time) (bool, error) {
+	c, ok := r.byID[id]
+	if !ok {
+		return false, nil
+	}
+	if c.LastMessageSeq != nil && *c.LastMessageSeq >= seq {
+		return false, nil // monotonic guard: never regress
+	}
+	c.LastMessageAt = &at
+	c.LastMessageSeq = &seq
+	c.LastMessageSnippet = snippet
+	c.LastSenderID = senderID
+	c.UpdatedAt = at
+	return true, nil
 }
 
 func (r *fakeConversationRepo) List(_ context.Context, q domain.ConversationListQuery) ([]domain.ConversationRow, error) {
@@ -328,7 +345,7 @@ func (r *fakeMembershipRepo) CountActive(_ context.Context, convID int64) (int64
 	return n, nil
 }
 
-func (r *fakeMembershipRepo) ActiveUserIDs(_ context.Context, convID int64) ([]int64, error) {
+func (r *fakeMembershipRepo) ActiveUserIDs(_ context.Context, _ tx.Querier, convID int64) ([]int64, error) {
 	var ids []int64
 	for uid, m := range r.rows[convID] {
 		if m.LeftAt == nil {
@@ -376,6 +393,53 @@ func (r *fakeMembershipRepo) ListMembers(_ context.Context, convID int64, q doma
 	return rows, nil
 }
 
+// MarkRead advances cursors monotonically (GREATEST semantics).
+func (r *fakeMembershipRepo) MarkRead(_ context.Context, _ tx.Tx, convID, userID, readSeq, deliveredSeq int64, at time.Time) (bool, bool, error) {
+	m := r.rows[convID][userID]
+	if m == nil || m.LeftAt != nil {
+		return false, false, nil
+	}
+	advR := readSeq > m.LastReadSeq
+	if advR {
+		m.LastReadSeq = readSeq
+		m.LastReadAt = &at
+	}
+	// A read receipt implies delivery (migration 000006 CHECK: delivered >= read).
+	effDelivered := deliveredSeq
+	if readSeq > effDelivered {
+		effDelivered = readSeq
+	}
+	advD := effDelivered > m.LastDeliveredSeq
+	if advD {
+		m.LastDeliveredSeq = effDelivered
+	}
+	return advR, advD, nil
+}
+
+func (r *fakeMembershipRepo) ListReceipts(_ context.Context, convID int64) ([]domain.ReceiptRow, error) {
+	var out []domain.ReceiptRow
+	for uid, m := range r.rows[convID] {
+		if m.LeftAt != nil {
+			continue
+		}
+		out = append(out, domain.ReceiptRow{UserID: uid, LastReadSeq: m.LastReadSeq, LastReadAt: m.LastReadAt})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UserID < out[j].UserID })
+	return out, nil
+}
+
+func (r *fakeMembershipRepo) CursorsByConversation(_ context.Context, convID int64) ([]domain.CursorRow, error) {
+	var out []domain.CursorRow
+	for uid, m := range r.rows[convID] {
+		if m.LeftAt != nil {
+			continue
+		}
+		out = append(out, domain.CursorRow{UserID: uid, LastReadSeq: m.LastReadSeq, LastDeliveredSeq: m.LastDeliveredSeq})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UserID < out[j].UserID })
+	return out, nil
+}
+
 type fakeSequenceRepo struct {
 	byID map[int64]int64
 }
@@ -385,6 +449,255 @@ func newFakeSequenceRepo() *fakeSequenceRepo { return &fakeSequenceRepo{byID: ma
 func (r *fakeSequenceRepo) Init(_ context.Context, _ tx.Tx, conversationID int64) error {
 	r.byID[conversationID] = 0
 	return nil
+}
+
+// fakeSequenceSource is an in-memory domain.SequenceSource: Redis-free counter
+// with the durable floor semantics (max-merge Persist).
+type fakeSequenceSource struct {
+	counters map[int64]int64
+	floors   map[int64]int64
+}
+
+func newFakeSequenceSource() *fakeSequenceSource {
+	return &fakeSequenceSource{counters: map[int64]int64{}, floors: map[int64]int64{}}
+}
+
+func (s *fakeSequenceSource) Next(_ context.Context, conversationID int64) (int64, error) {
+	s.counters[conversationID]++
+	return s.counters[conversationID], nil
+}
+
+func (s *fakeSequenceSource) Persist(_ context.Context, _ tx.Tx, conversationID, sequence int64) error {
+	if s.floors[conversationID] < sequence {
+		s.floors[conversationID] = sequence
+	}
+	return nil
+}
+
+func (s *fakeSequenceSource) Floor(_ context.Context, conversationID int64) (int64, error) {
+	return s.floors[conversationID], nil
+}
+
+// fakeMessageRepo is an in-memory domain.MessageRepository modeling the
+// partial-unique dedupe on (sender_id, client_msg_id) and the guarded
+// edit/tombstone updates.
+type fakeMessageRepo struct {
+	byID        map[int64]*domain.Message
+	edits       []domain.MessageEdit
+	conflictSeq map[int64]bool // sequences that collide on the composite PK
+}
+
+func newFakeMessageRepo() *fakeMessageRepo {
+	return &fakeMessageRepo{byID: map[int64]*domain.Message{}, conflictSeq: map[int64]bool{}}
+}
+
+// setConflict makes Insert return ErrSequenceConflict for the given sequence,
+// simulating a composite-PK collision (DATABASE.md §11 final guard).
+func (r *fakeMessageRepo) setConflict(seq int64) { r.conflictSeq[seq] = true }
+
+func (r *fakeMessageRepo) Insert(_ context.Context, _ tx.Tx, m *domain.Message) (bool, error) {
+	if r.conflictSeq[m.Sequence] {
+		return false, domain.ErrSequenceConflict
+	}
+	for _, ex := range r.byID {
+		if ex.SenderID != nil && m.SenderID != nil &&
+			*ex.SenderID == *m.SenderID && m.ClientMsgID != nil &&
+			ex.ClientMsgID != nil && *ex.ClientMsgID == *m.ClientMsgID {
+			return false, nil // dedupe replay
+		}
+	}
+	cp := *m
+	r.byID[m.ID] = &cp
+	return true, nil
+}
+
+func (r *fakeMessageRepo) FindByClientMsgID(_ context.Context, _ tx.Querier, senderID int64, clientMsgID string) (*domain.Message, error) {
+	for _, m := range r.byID {
+		if m.SenderID != nil && *m.SenderID == senderID && m.ClientMsgID != nil && *m.ClientMsgID == clientMsgID {
+			cp := *m
+			return &cp, nil
+		}
+	}
+	return nil, domain.ErrMessageNotFound
+}
+
+func (r *fakeMessageRepo) FindByID(_ context.Context, id int64) (*domain.Message, error) {
+	m, ok := r.byID[id]
+	if !ok {
+		return nil, domain.ErrMessageNotFound
+	}
+	cp := *m
+	return &cp, nil
+}
+
+func (r *fakeMessageRepo) FindByConversationSeq(_ context.Context, convID, seq int64) (*domain.Message, error) {
+	for _, m := range r.byID {
+		if m.ConversationID == convID && m.Sequence == seq {
+			cp := *m
+			return &cp, nil
+		}
+	}
+	return nil, domain.ErrMessageNotFound
+}
+
+func (r *fakeMessageRepo) ListByConversation(_ context.Context, q domain.MessageListQuery) ([]domain.Message, error) {
+	var out []domain.Message
+	for _, m := range r.byID {
+		if m.ConversationID != q.ConversationID {
+			continue
+		}
+		if q.BeforeSeq != nil && m.Sequence >= *q.BeforeSeq {
+			continue
+		}
+		if q.AfterGlobalSeq != nil && m.GlobalSeq <= *q.AfterGlobalSeq {
+			continue
+		}
+		out = append(out, *m)
+	}
+	if q.AfterGlobalSeq != nil {
+		sort.Slice(out, func(i, j int) bool { return out[i].GlobalSeq < out[j].GlobalSeq })
+	} else {
+		sort.Slice(out, func(i, j int) bool { return out[i].Sequence > out[j].Sequence })
+	}
+	if len(out) > q.Limit {
+		out = out[:q.Limit]
+	}
+	return out, nil
+}
+
+func (r *fakeMessageRepo) Edit(_ context.Context, _ tx.Tx, editID int64, m *domain.Message, oldContent string, at time.Time) (bool, error) {
+	cur, ok := r.byID[m.ID]
+	if !ok || cur.DeletedAt != nil {
+		return false, nil
+	}
+	r.edits = append(r.edits, domain.MessageEdit{ID: editID, MessageID: m.ID, OldContent: oldContent, EditedAt: at})
+	cur.Content = m.Content
+	cur.EditCount++
+	cur.EditedAt = &at
+	return true, nil
+}
+
+func (r *fakeMessageRepo) Tombstone(_ context.Context, _ tx.Tx, id, deletedBy int64, at time.Time) (bool, error) {
+	m, ok := r.byID[id]
+	if !ok || m.DeletedAt != nil {
+		return false, nil
+	}
+	m.DeletedAt = &at
+	m.DeletedBy = &deletedBy
+	return true, nil
+}
+
+func (r *fakeMessageRepo) SenderIDsBetween(_ context.Context, _ tx.Tx, convID, from, to int64) ([]int64, error) {
+	seen := map[int64]bool{}
+	var out []int64
+	for _, m := range r.byID {
+		if m.ConversationID == convID && m.Sequence > from && m.Sequence <= to && m.SenderID != nil {
+			if !seen[*m.SenderID] {
+				seen[*m.SenderID] = true
+				out = append(out, *m.SenderID)
+			}
+		}
+	}
+	return out, nil
+}
+
+// fakeReactionRepo is an in-memory domain.ReactionRepository.
+type fakeReactionRepo struct {
+	rows map[string]domain.ReactionRow
+}
+
+func newFakeReactionRepo() *fakeReactionRepo {
+	return &fakeReactionRepo{rows: map[string]domain.ReactionRow{}}
+}
+
+func reactionKey(mid, uid int64, emoji string) string {
+	return strconv.FormatInt(mid, 10) + ":" + strconv.FormatInt(uid, 10) + ":" + emoji
+}
+
+func (r *fakeReactionRepo) Add(_ context.Context, _ tx.Tx, rec *domain.ReactionRow) (bool, error) {
+	k := reactionKey(rec.MessageID, rec.UserID, rec.Emoji)
+	if _, ok := r.rows[k]; ok {
+		return false, nil
+	}
+	r.rows[k] = *rec
+	return true, nil
+}
+
+func (r *fakeReactionRepo) Remove(_ context.Context, _ tx.Tx, mid, uid int64, emoji string) (bool, error) {
+	k := reactionKey(mid, uid, emoji)
+	if _, ok := r.rows[k]; !ok {
+		return false, nil
+	}
+	delete(r.rows, k)
+	return true, nil
+}
+
+func (r *fakeReactionRepo) DistinctEmoji(_ context.Context, mid int64) (int64, error) {
+	seen := map[string]bool{}
+	for _, rec := range r.rows {
+		if rec.MessageID == mid {
+			seen[rec.Emoji] = true
+		}
+	}
+	return int64(len(seen)), nil
+}
+
+func (r *fakeReactionRepo) Count(_ context.Context, mid int64, emoji string) (int64, error) {
+	var n int64
+	for _, rec := range r.rows {
+		if rec.MessageID == mid && rec.Emoji == emoji {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (r *fakeReactionRepo) CountsByMessages(_ context.Context, ids []int64) (map[int64]map[string]int64, error) {
+	out := map[int64]map[string]int64{}
+	for _, rec := range r.rows {
+		if !contains(ids, rec.MessageID) {
+			continue
+		}
+		if out[rec.MessageID] == nil {
+			out[rec.MessageID] = map[string]int64{}
+		}
+		out[rec.MessageID][rec.Emoji]++
+	}
+	return out, nil
+}
+
+func (r *fakeReactionRepo) UserIDsByMessages(_ context.Context, ids []int64) (map[int64]map[string][]int64, error) {
+	out := map[int64]map[string][]int64{}
+	for _, rec := range r.rows {
+		if !contains(ids, rec.MessageID) {
+			continue
+		}
+		if out[rec.MessageID] == nil {
+			out[rec.MessageID] = map[string][]int64{}
+		}
+		out[rec.MessageID][rec.Emoji] = append(out[rec.MessageID][rec.Emoji], rec.UserID)
+	}
+	return out, nil
+}
+
+func (r *fakeReactionRepo) Reactors(_ context.Context, mid int64, emoji string) ([]domain.Reactor, error) {
+	var out []domain.Reactor
+	for _, rec := range r.rows {
+		if rec.MessageID == mid && rec.Emoji == emoji {
+			out = append(out, domain.Reactor{UserID: rec.UserID, At: rec.CreatedAt})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].At.After(out[j].At) })
+	return out, nil
+}
+
+func contains(ids []int64, id int64) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }
 
 type fakeChangeLogRepo struct {
@@ -412,6 +725,9 @@ type harness struct {
 	convos    *fakeConversationRepo
 	members   *fakeMembershipRepo
 	sequences *fakeSequenceRepo
+	messages  *fakeMessageRepo
+	reactions *fakeReactionRepo
+	seqsource *fakeSequenceSource
 	changelog *fakeChangeLogRepo
 	ids       *fakeIDGen
 	clk       *stubClock
@@ -423,26 +739,33 @@ func newHarness(t *testing.T) *harness {
 	users := newFakeUserRepo()
 	members := newFakeMembershipRepo(users)
 	convos := newFakeConversationRepo(members, users)
+	messages := newFakeMessageRepo()
 	h := &harness{
 		begin:     &fakeBeginner{},
 		users:     users,
 		convos:    convos,
 		members:   members,
 		sequences: newFakeSequenceRepo(),
+		messages:  messages,
+		reactions: newFakeReactionRepo(),
+		seqsource: newFakeSequenceSource(),
 		changelog: &fakeChangeLogRepo{},
 		ids:       &fakeIDGen{next: 9000000000},
 		now:       time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC),
 	}
 	h.clk = &stubClock{now: h.now}
 	h.svc = New(Deps{
-		Conversations: convos,
-		Memberships:   members,
-		Sequences:     h.sequences,
-		ChangeLog:     h.changelog,
-		Users:         users,
-		IDs:           h.ids,
-		TxBeginner:    h.begin,
-		Clock:         h.clk,
+		Conversations:  convos,
+		Memberships:    members,
+		Sequences:      h.sequences,
+		Messages:       messages,
+		Reactions:      h.reactions,
+		SequenceSource: h.seqsource,
+		ChangeLog:      h.changelog,
+		Users:          users,
+		IDs:            h.ids,
+		TxBeginner:     h.begin,
+		Clock:          h.clk,
 	})
 	return h
 }

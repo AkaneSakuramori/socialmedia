@@ -54,7 +54,7 @@ func (s *service) UpdateConversation(ctx context.Context, cmd UpdateConversation
 
 	c.UpdatedAt = s.now()
 
-	affected, err := s.deps.Memberships.ActiveUserIDs(ctx, c.ID)
+	affected, err := s.deps.Memberships.ActiveUserIDs(ctx, s.deps.DB, c.ID)
 	if err != nil {
 		return nil, err
 	}

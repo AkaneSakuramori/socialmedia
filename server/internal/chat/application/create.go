@@ -132,7 +132,7 @@ func (s *service) CreateConversation(ctx context.Context, cmd CreateConversation
 	if ctype == domain.ConversationDirect {
 		row.CounterpartID = &others[0]
 	}
-	users, err := s.deps.Users.ListByIDs(ctx, affected)
+	users, err := s.deps.Users.ListByIDs(ctx, s.deps.DB, affected)
 	if err != nil {
 		return nil, makeErr(err, "chat: resolve participant names")
 	}
@@ -167,7 +167,7 @@ func (s *service) conversationListView(ctx context.Context, c *domain.Conversati
 	}
 	names := map[int64]string{}
 	if row.CounterpartID != nil {
-		users, err := s.deps.Users.ListByIDs(ctx, []int64{*row.CounterpartID})
+		users, err := s.deps.Users.ListByIDs(ctx, s.deps.DB, []int64{*row.CounterpartID})
 		if err != nil {
 			return ConversationView{}, err
 		}

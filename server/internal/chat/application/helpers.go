@@ -129,7 +129,7 @@ func (s *service) validateParticipants(ctx context.Context, caller int64, ctype 
 
 	// Every participant must be a live account (deleted accounts are omitted
 	// by the repository, so a short count means an unknown/deleted user).
-	users, err := s.deps.Users.ListByIDs(ctx, others)
+	users, err := s.deps.Users.ListByIDs(ctx, s.deps.DB, others)
 	if err != nil {
 		return nil, err
 	}

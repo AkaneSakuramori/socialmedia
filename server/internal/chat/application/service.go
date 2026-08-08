@@ -63,6 +63,37 @@ type Service interface {
 	// SetArchive archives/unarchives the conversation for the caller
 	// (API.md §7.11).
 	SetArchive(ctx context.Context, cmd SetArchiveCommand) (*ArchiveResult, error)
+	// SendMessage persists a message atomically (API.md §8.2): sequence
+	// allocation, the message row, the monotonic conversation bump, and the
+	// change_log outbox commit in one transaction. Idempotent: a retry with the
+	// same client_msg_id returns the original message (Created=false → HTTP
+	// 200). Exactly-once intent is enforced by the partial unique index even if
+	// the HTTP idempotency cache is lost.
+	SendMessage(ctx context.Context, cmd SendMessageCommand) (*SendMessageResult, error)
+	// ListMessages paginates message history (API.md §8.1), keyset on sequence
+	// (scroll-back) or global_seq (delta poll). Strictly ordered output.
+	ListMessages(ctx context.Context, cmd ListMessagesCommand) (*MessageListResult, error)
+	// GetMessage fetches one message by id (API.md §8.3), gated on membership.
+	GetMessage(ctx context.Context, cmd GetMessageCommand) (*MessageView, error)
+	// EditMessage edits a message within the sender-only edit window
+	// (API.md §8.4). Edits are append-only (message_edits); concurrent edits
+	// both record and last-write-wins on the visible body.
+	EditMessage(ctx context.Context, cmd EditMessageCommand) (*MessageView, error)
+	// DeleteMessage deletes a message (API.md §8.5). mode=all tombstones the
+	// row (never re-used sequence slot); mode=self is client-local in v1 and a
+	// no-op on the server.
+	DeleteMessage(ctx context.Context, cmd DeleteMessageCommand) (*DeleteMessageResult, error)
+	// AddReaction adds a reaction (API.md §8.6); a duplicate is a no-op 200.
+	AddReaction(ctx context.Context, cmd ReactionCommand) (*ReactionResult, error)
+	// RemoveReaction removes the caller's reaction (API.md §8.7).
+	RemoveReaction(ctx context.Context, cmd ReactionCommand) (*ReactionResult, error)
+	// ListReactions lists the reactors for a message + emoji (API.md §8.8).
+	ListReactions(ctx context.Context, cmd ListReactionsCommand) (*ReactionsResult, error)
+	// MarkRead advances the caller's read/delivered cursors monotonically
+	// (API.md §10.1/§10.3; §7.12 shares the endpoint).
+	MarkRead(ctx context.Context, cmd MarkReadCommand) (*ReceiptResult, error)
+	// GetReceipts returns the per-member read state (API.md §10.2).
+	GetReceipts(ctx context.Context, cmd GetReceiptsCommand) (*ReceiptsResult, error)
 }
 
 // CreateConversationCommand is the validated input for §7.2. ParticipantIDs
@@ -224,6 +255,190 @@ type ArchiveResult struct {
 	IsArchived bool `json:"is_archived"`
 }
 
+// SendMessageCommand is the validated input for §8.2. Exactly one of Text or
+// Media is set. Mentions must be conversation members (validated server-side).
+type SendMessageCommand struct {
+	UserID         int64
+	ConversationID int64
+	ClientMsgID    string
+	Type           string
+	Text           *string
+	Media          []domain.Attachment
+	ReplyToSeq     *int64
+	Mentions       []int64
+}
+
+// SendMessageResult carries the persisted (or replayed) message. Created=false
+// means an idempotent replay returned the original message (HTTP 200).
+type SendMessageResult struct {
+	View    MessageView
+	Created bool
+}
+
+// ListMessagesCommand is the §8.1 history/delta seek. Cursor is the opaque
+// next_cursor from a previous page (authoritative when present); BeforeSeq
+// (scroll-back) and AfterGlobalSeq (delta poll) come from the raw query
+// params. Neither seek opens the newest page.
+type ListMessagesCommand struct {
+	UserID         int64
+	ConversationID int64
+	Cursor         string
+	BeforeSeq      *int64
+	AfterGlobalSeq *int64
+	Limit          int
+}
+
+// MessageListResult is a page of message history/delta.
+type MessageListResult struct {
+	Items   []MessageView
+	Next    *string
+	HasMore bool
+	Limit   int
+}
+
+// GetMessageCommand identifies one message for §8.3.
+type GetMessageCommand struct {
+	UserID    int64
+	MessageID int64
+}
+
+// EditMessageCommand is the §8.4 patch (content only; type/media never change).
+type EditMessageCommand struct {
+	UserID    int64
+	MessageID int64
+	NewText   string
+}
+
+// DeleteMessageCommand is the §8.5 delete. Mode is "all" (tombstone) or "self"
+// (client-local no-op in v1).
+type DeleteMessageCommand struct {
+	UserID    int64
+	MessageID int64
+	Mode      string
+}
+
+// DeleteMessageResult echoes the applied delete (API.md §8.5 response 200).
+type DeleteMessageResult struct {
+	Deleted   string `json:"deleted"`
+	MessageID string `json:"message_id"`
+}
+
+// ReactionCommand adds/removes one (message, user, emoji) reaction (§8.6/§8.7).
+type ReactionCommand struct {
+	UserID    int64
+	MessageID int64
+	Emoji     string
+}
+
+// ReactionResult echoes the reaction state (API.md §8.6/§8.7 response 200).
+type ReactionResult struct {
+	MessageID string `json:"message_id"`
+	Emoji     string `json:"emoji"`
+	Count     int64  `json:"count"`
+}
+
+// ListReactionsCommand lists the reactors for §8.8.
+type ListReactionsCommand struct {
+	UserID    int64
+	MessageID int64
+	Emoji     string
+}
+
+// ReactionsResult is the §8.8 reactor list.
+type ReactionsResult struct {
+	Emoji    string        `json:"emoji"`
+	Reactors []ReactorView `json:"reactors"`
+}
+
+// ReactorView is one §8.8 reactor entry.
+type ReactorView struct {
+	UserID      string      `json:"user_id"`
+	DisplayName string      `json:"display_name"`
+	Avatar      *AvatarView `json:"avatar"`
+	At          time.Time   `json:"at"`
+}
+
+// MarkReadCommand is the §10.1/§10.3 cursor advance. DeliveredSeq is optional
+// (deliver_up_to_seq).
+type MarkReadCommand struct {
+	UserID         int64
+	ConversationID int64
+	ReadSeq        int64
+	DeliveredSeq   *int64
+}
+
+// ReceiptResult echoes the effective cursors (API.md §10.1 response 200).
+type ReceiptResult struct {
+	LastReadSeq      string `json:"last_read_seq"`
+	LastDeliveredSeq string `json:"last_delivered_seq"`
+}
+
+// GetReceiptsCommand fetches the per-member read state (§10.2).
+type GetReceiptsCommand struct {
+	UserID         int64
+	ConversationID int64
+}
+
+// ReceiptsResult is the §10.2 readers[] response.
+type ReceiptsResult struct {
+	ConversationID string       `json:"conversation_id"`
+	LastMessageSeq *string      `json:"last_message_seq"`
+	Readers        []ReaderView `json:"readers"`
+}
+
+// ReaderView is one §10.2 reader entry.
+type ReaderView struct {
+	UserID      string     `json:"user_id"`
+	DisplayName string     `json:"display_name"`
+	LastReadSeq string     `json:"last_read_seq"`
+	LastReadAt  *time.Time `json:"last_read_at"`
+}
+
+// MessageView is the message shape (API.md §8.1). All ids are strings.
+type MessageView struct {
+	ID             string              `json:"id"`
+	ConversationID string              `json:"conversation_id"`
+	Sequence       string              `json:"sequence"`
+	SenderID       *string             `json:"sender_id"`
+	Sender         *SenderView         `json:"sender"`
+	Type           string              `json:"type"`
+	Content        *MessageText        `json:"content"`
+	Media          []domain.Attachment `json:"media"`
+	ClientMsgID    *string             `json:"client_msg_id"`
+	CreatedAt      time.Time           `json:"created_at"`
+	EditedAt       *time.Time          `json:"edited_at"`
+	Status         string              `json:"status"`
+	ReplyTo        *ReplyToView        `json:"reply_to"`
+	Mentions       []string            `json:"mentions"`
+	Reactions      []domain.Reaction   `json:"reactions"`
+	ReadBy         []ReadByView        `json:"read_by"`
+	GlobalSeq      string              `json:"global_seq"`
+}
+
+// SenderView is the §8.1 sender object.
+type SenderView struct {
+	DisplayName string      `json:"display_name"`
+	Avatar      *AvatarView `json:"avatar"`
+}
+
+// MessageText is the §8.1 content object.
+type MessageText struct {
+	Text *string `json:"text"`
+}
+
+// ReplyToView is the §8.1 reply_to object.
+type ReplyToView struct {
+	ID       string      `json:"id"`
+	SenderID *string     `json:"sender_id"`
+	Content  MessageText `json:"content"`
+}
+
+// ReadByView is one §8.1 read_by entry.
+type ReadByView struct {
+	UserID string     `json:"user_id"`
+	At     *time.Time `json:"at"`
+}
+
 // ConversationView is the chat-list item shape (API.md §7.1). All ids are
 // serialized as strings (API.md §2.2).
 type ConversationView struct {
@@ -320,14 +535,22 @@ type MemberView struct {
 
 // Deps is the constructor-injected dependency set for the chat service.
 type Deps struct {
-	Conversations domain.ConversationRepository
-	Memberships   domain.MembershipRepository
-	Sequences     domain.SequenceRepository
-	ChangeLog     domain.ChangeLogRepository
-	Users         userdomain.UserRepository
-	IDs           domain.IDGenerator
-	TxBeginner    tx.Beginner
-	Clock         clock.Clock
+	Conversations  domain.ConversationRepository
+	Memberships    domain.MembershipRepository
+	Sequences      domain.SequenceRepository
+	Messages       domain.MessageRepository
+	Reactions      domain.ReactionRepository
+	SequenceSource domain.SequenceSource
+	ChangeLog      domain.ChangeLogRepository
+	Users          userdomain.UserRepository
+	IDs            domain.IDGenerator
+	TxBeginner     tx.Beginner
+	Clock          clock.Clock
+	// DB is the pool-backed read surface for pre-transaction and post-commit
+	// reads (the connection pool implements tx.Querier). Transactional fan-out
+	// reads pass the open transaction instead, so a write tx never holds a
+	// second pool connection (a pool-exhaustion deadlock hazard under load).
+	DB tx.Querier
 }
 
 type service struct {

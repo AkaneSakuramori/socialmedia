@@ -69,6 +69,25 @@ func mapError(err error) error {
 	case errors.Is(err, chatdomain.ErrMembershipNotFound):
 		return apierr.Validation("membership not found",
 			apierr.FieldError{Field: "user_id", Reason: "not_a_member"})
+	case errors.Is(err, chatdomain.ErrMessageNotFound):
+		return apierr.MessageNotFound("message not found")
+	case errors.Is(err, chatdomain.ErrNotSender),
+		errors.Is(err, chatdomain.ErrEditWindowExpired),
+		errors.Is(err, chatdomain.ErrMessageDeleted),
+		errors.Is(err, chatdomain.ErrMessageNotEditable):
+		return apierr.Forbidden("this message cannot be modified")
+	case errors.Is(err, chatdomain.ErrReactionLimit):
+		return apierr.Validation("reaction limit reached",
+			apierr.FieldError{Field: "emoji", Reason: "reaction_limit"})
+	case errors.Is(err, chatdomain.ErrInvalidEmoji):
+		return apierr.Validation("invalid reaction emoji",
+			apierr.FieldError{Field: "emoji", Reason: "invalid_emoji"})
+	case errors.Is(err, chatdomain.ErrMentionNotMember):
+		return apierr.Validation("mention is not a conversation member",
+			apierr.FieldError{Field: "mentions", Reason: "not_a_member"})
+	case errors.Is(err, chatdomain.ErrReplyNotFound):
+		return apierr.Validation("reply target not found",
+			apierr.FieldError{Field: "reply_to_seq", Reason: "invalid_reply_target"})
 	}
 
 	// User domain.

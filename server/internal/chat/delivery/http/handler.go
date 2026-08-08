@@ -36,6 +36,10 @@ func (h *Handler) Router() http.Handler {
 	mux.Handle("GET /v1/conversations", http.HandlerFunc(h.list))
 	mux.Handle("GET /v1/conversations/{conversation_id}", http.HandlerFunc(h.get))
 	mux.Handle("GET /v1/conversations/{conversation_id}/members", http.HandlerFunc(h.listMembers))
+	mux.Handle("GET /v1/conversations/{conversation_id}/messages", http.HandlerFunc(h.listMessages))
+	mux.Handle("GET /v1/conversations/{conversation_id}/receipts", http.HandlerFunc(h.getReceipts))
+	mux.Handle("GET /v1/messages/{message_id}", http.HandlerFunc(h.getMessage))
+	mux.Handle("GET /v1/messages/{message_id}/reactions", http.HandlerFunc(h.listReactions))
 
 	// Unsafe writes — Idempotency-Key required.
 	unsafe := httpapi.Idempotency(h.redis)
@@ -47,6 +51,12 @@ func (h *Handler) Router() http.Handler {
 	mux.Handle("PUT /v1/conversations/{conversation_id}/mute", unsafe(http.HandlerFunc(h.setMute)))
 	mux.Handle("PUT /v1/conversations/{conversation_id}/pin", unsafe(http.HandlerFunc(h.setPin)))
 	mux.Handle("PUT /v1/conversations/{conversation_id}/archive", unsafe(http.HandlerFunc(h.setArchive)))
+	mux.Handle("PUT /v1/conversations/{conversation_id}/receipts", unsafe(http.HandlerFunc(h.markRead)))
+	mux.Handle("POST /v1/conversations/{conversation_id}/messages", unsafe(http.HandlerFunc(h.sendMessage)))
+	mux.Handle("PATCH /v1/messages/{message_id}", unsafe(http.HandlerFunc(h.editMessage)))
+	mux.Handle("DELETE /v1/messages/{message_id}", unsafe(http.HandlerFunc(h.deleteMessage)))
+	mux.Handle("PUT /v1/messages/{message_id}/reactions/{emoji}", unsafe(http.HandlerFunc(h.addReaction)))
+	mux.Handle("DELETE /v1/messages/{message_id}/reactions/{emoji}", unsafe(http.HandlerFunc(h.removeReaction)))
 
 	return httpapi.RequireAuth(h.auth)(mux)
 }

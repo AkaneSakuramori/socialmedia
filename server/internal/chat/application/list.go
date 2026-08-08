@@ -58,7 +58,7 @@ func (s *service) ListConversations(ctx context.Context, cmd ListConversationsCo
 	}
 	names := map[int64]string{}
 	if len(nameIDs) > 0 {
-		users, err := s.deps.Users.ListByIDs(ctx, nameIDs)
+		users, err := s.deps.Users.ListByIDs(ctx, s.deps.DB, nameIDs)
 		if err != nil {
 			return nil, err
 		}
