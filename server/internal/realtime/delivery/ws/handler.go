@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/AkaneSakuramori/socialmedia/server/internal/chat/application"
@@ -100,8 +101,26 @@ func NewHandler(chat application.Service, log *slog.Logger) *Handler {
 
 // HandleFrame dispatches one inbound frame (API.md §17). It returns an error
 // only for protocol violations that should close the socket; business failures
-// are acked with an error payload and keep the socket open (§18.4).
+// are acked with an error payload and keep the socket open (§18.4). It first
+// enforces the per-connection WS frame budgets (§16.8, WS-3): a breach is acked
+// RATE_LIMITED and, once sustained, closes the socket with 4501.
 func (h *Handler) HandleFrame(ctx context.Context, c *Connection, frame *domain.Frame) error {
+	// Rate-limit before dispatch. Ping/pong/ack are protocol frames and exempt
+	// (they are bounded by the heartbeat and are not user work); everything else
+	// counts toward the standard budget, with ephemeral classes throttled per
+	// target.
+	if class, key := rateClass(frame); class != "" {
+		if !c.rate.allow(class, key) {
+			h.ackError(c, frame.ID, wireError{Code: "RATE_LIMITED", Retryable: true})
+			if c.rate.abusing() {
+				h.log.Warn("realtime: closing socket for sustained rate-limit abuse",
+					"conn", c.ID(), "user", c.UserID(), "class", class)
+				return errors.New("realtime: rate-limit abuse")
+			}
+			return nil
+		}
+	}
+
 	switch frame.Type {
 	case domain.EventPing:
 		// Protocol frame — no ack, no id (API.md §17.12).
@@ -368,4 +387,35 @@ func decodeData(frame *domain.Frame, out any) error {
 		return fmt.Errorf("realtime: invalid frame data: %w", err)
 	}
 	return nil
+}
+
+// rateClass maps a frame to its rate-limit tier and bucket key (API.md §16.8,
+// Appendix B). Protocol frames (ping/pong/ack) return "" → exempt. Ephemeral
+// classes are keyed by target so each conversation/user gets its own budget;
+// durable and C2S frames fall to the per-connection standard budget.
+func rateClass(frame *domain.Frame) (class, key string) {
+	switch frame.Type {
+	case domain.EventPing, domain.EventPong, domain.EventAck:
+		return "", ""
+	case domain.EventTypingStart, domain.EventTypingStop:
+		// ws_typing: 1 per 2 s per conversation.
+		var p struct {
+			ConversationID int64 `json:"conversation_id"`
+		}
+		_ = json.Unmarshal(frame.Data, &p)
+		return "typing", strconv.FormatInt(p.ConversationID, 10)
+	case domain.EventPresenceUpdate:
+		return "presence", "" // 1 per s per user
+	case domain.EventReceiptRead, domain.EventReceiptDelivered:
+		// ws_read: 1 per 500 ms per conversation.
+		var p struct {
+			ConversationID int64 `json:"conversation_id"`
+		}
+		_ = json.Unmarshal(frame.Data, &p)
+		return "read", strconv.FormatInt(p.ConversationID, 10)
+	default:
+		// Everything else (message.*, reaction.*, subscribe, resume, hello)
+		// counts toward the per-connection standard budget.
+		return "standard", ""
+	}
 }

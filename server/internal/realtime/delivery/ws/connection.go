@@ -41,6 +41,10 @@ type Connection struct {
 	closeOnce sync.Once
 	closeCode domain.CloseCode
 	closing   atomic.Bool
+
+	// rate holds the per-connection WS frame budget enforcement (API.md §16.8,
+	// SECURITY_SPEC.md WS-3) and the sustained-abuse counter.
+	rate *connRate
 }
 
 // newConnection wires a socket into the hub without registering it. The caller
@@ -57,6 +61,7 @@ func newConnection(id string, userID, sessionID int64, deviceID string, ws *webs
 		subscribed: make(map[int64]struct{}),
 		done:       make(chan struct{}),
 		closingCh:  make(chan struct{}),
+		rate:       newConnRate(),
 	}
 }
 
@@ -238,6 +243,9 @@ func (c *Connection) writePump(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		if c.isClosing() {
+			// Drain the send channel before closing so acks enqueued ahead of
+			// the close (e.g. RATE_LIMITED, API.md §16.8) reach the client.
+			c.drain()
 			c.gracefulClose()
 			return
 		}
@@ -259,11 +267,30 @@ func (c *Connection) writePump(ctx context.Context) {
 				return
 			}
 		case <-c.closingCh:
+			c.drain()
 			c.gracefulClose()
 			return
 		case <-ctx.Done():
 			return
 		case <-c.done:
+			return
+		}
+	}
+}
+
+// drain flushes the send channel best-effort before a graceful close. It is
+// bounded by WriteTimeout per frame so a stuck socket cannot stall shutdown.
+func (c *Connection) drain() {
+	for {
+		select {
+		case b := <-c.send:
+			wctx, cancel := context.WithTimeout(context.Background(), c.hub.cfg.WriteTimeout)
+			err := c.ws.Write(wctx, websocket.MessageText, b)
+			cancel()
+			if err != nil {
+				return
+			}
+		default:
 			return
 		}
 	}
