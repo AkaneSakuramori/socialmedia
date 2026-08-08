@@ -25,7 +25,7 @@ func New(cfg config.Config, log *slog.Logger, liveness, readiness http.Handler, 
 	mux.Handle("GET /healthz", liveness)
 	mux.Handle("GET /readyz", readiness)
 	if extra != nil {
-		mux.Handle("/", extra)
+		mux.Handle("/v1/", extra)
 	}
 	mux.HandleFunc("/", notFound)
 

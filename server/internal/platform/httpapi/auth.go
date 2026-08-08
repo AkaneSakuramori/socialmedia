@@ -39,7 +39,7 @@ func PrincipalFrom(ctx context.Context) (Principal, bool) {
 
 // RequireAuth is the bearer-token gateway middleware. It rejects requests
 // without a Bearer token (401 UNAUTHORIZED), without the X-Device-Id header
-// (400), or whose token fails gateway validation (401 TOKEN_EXPIRED /
+// (422), or whose token fails gateway validation (401 TOKEN_EXPIRED /
 // TOKEN_REVOKED / SESSION_REVOKED, 403 ACCOUNT_SUSPENDED / ACCOUNT_DELETED).
 // On success it binds the Principal to the request context.
 func RequireAuth(auth Authenticator) func(http.Handler) http.Handler {

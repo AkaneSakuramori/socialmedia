@@ -77,6 +77,24 @@ func TestNotFoundReturnsProblemJSON(t *testing.T) {
 	}
 }
 
+func TestDomainRoutesMountedUnderV1(t *testing.T) {
+	cfg := config.Config{HTTPPort: "0", ReadHeaderTimeout: 5 * time.Second}
+	reg := health.NewRegistry()
+	log := observability.NewLogger("test")
+	domain := http.NewServeMux()
+	domain.HandleFunc("GET /v1/ping", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := New(cfg, log, health.Handler(log, reg, false), health.Handler(log, reg, true), domain)
+
+	if rec := do(t, srv, "/v1/ping"); rec.Code != http.StatusNoContent {
+		t.Errorf("/v1/ping status = %d, want 204", rec.Code)
+	}
+	if rec := do(t, srv, "/nope"); rec.Code != http.StatusNotFound {
+		t.Errorf("/nope status = %d, want 404", rec.Code)
+	}
+}
+
 func TestPanicRecoveredTo500(t *testing.T) {
 	log := observability.NewLogger("test")
 	mux := http.NewServeMux()

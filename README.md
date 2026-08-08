@@ -80,7 +80,7 @@ InChat is a social media and messaging platform designed and engineered for Indi
 
 ## Backend Quickstart
 
-Requirements: Go 1.24+, Docker + Docker Compose, Python 3 (venv).
+Requirements: Go 1.25+, Docker + Docker Compose, Python 3 (venv).
 
 ```sh
 make dev-up      # start PostgreSQL + Redis (compose)

@@ -1,6 +1,6 @@
 # InChat — Backend (Go)
 
-The InChat backend is a **modular monolith** (Go 1.24) following the finalized
+The InChat backend is a **modular monolith** (Go 1.25) following the finalized
 `architecture/` documents — `ENGINEERING.md` is the backend source of truth,
 `ARCHITECTURE.md` and `API.md` the contract, `ENGINEERING_RULES.md` the house law.
 
@@ -16,7 +16,7 @@ The InChat backend is a **modular monolith** (Go 1.24) following the finalized
 
 | Layer | Technology |
 |---|---|
-| Language | Go 1.24 (`log/slog`, stdlib `net/http`) |
+| Language | Go 1.25 (`log/slog`, stdlib `net/http`) |
 | Database | PostgreSQL 16 (pgx/v5 pool) |
 | Cache/realtime | Redis 7 (go-redis/v9) |
 | Migrations | golang-migrate v4 (via `migrate/migrate` Docker image) |
@@ -133,7 +133,7 @@ make ci          # vet + race tests + build (the local gate)
 
 ## Docker
 
-- `server/Dockerfile` — multi-stage: `golang:1.24-alpine` build → distroless
+- `server/Dockerfile` — multi-stage: `golang:1.25-alpine` build → distroless
   static non-root runtime; `CGO_ENABLED=0` static binary; `VERSION` ldflag.
 - `infra/docker/docker-compose.yml` — postgres (with role-bootstrap init SQL),
   redis (appendonly), api-server (healthchecked), migrate (on-demand, `tools` profile).

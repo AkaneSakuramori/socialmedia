@@ -2,7 +2,7 @@
 # Multi-stage build (DEVOPS.md §5): build in a full toolchain, ship a minimal
 # distroless runtime image. Immutable, non-root, read-only, static binary.
 
-FROM golang:1.24-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 
 # Cache dependencies first (layer reuses on code change).
