@@ -6,6 +6,46 @@ versioning follows [SemVer](https://semver.org/). Newest entries appear first.
 
 ## [Unreleased]
 
+### Sprint 2 - Core Messaging (milestone 4: presence, typing indicators, and reconnection/resume)
+
+#### Added
+- **Redis presence (`realtime/presence`)** - multi-device, multi-instance
+  presence: `presence:v1:online:{user}` instance-aggregated hashes with
+  atomic connect/disconnect Lua (a transition fires exactly once per
+  online/offline edge), per-connection registration, TTL (60s) with a
+  heartbeat sweeper, `status`/`custom_status` meta, `last_seen` (30d), and a
+  per-user conversation-interest set (24h) scoping presence fan-out.
+- **Redis typing (`realtime/typing`)** - conversation-scoped typing state
+  with a 10s expiry and a 2s server-clock throttle (Redis `TIME`, shared
+  across instances); `typing.start`/`typing.stop` broadcast, disconnect
+  cleanup broadcasts `stopped` so typing never sticks.
+- **Backplane ephemeral events** - `presence.changed` and `typing.indicator`
+  ride the same `realtime:events` channel as outbox rows; the dispatcher
+  routes them to conversation subscribers and never replays them.
+- **Resume protocol (v2)** - `resume` validates cursors and the bound
+  session, then replays the gap from the dispatcher's shared bounded replay
+  buffer: `resume_ack` carries fresh contiguous per-connection seqs over the
+  replayed frames; `resume_rejected` with `session_revoked` /
+  `buffer_expired` falls back to full sync.
+- **Dispatcher replay + dedupe** - mutex-protected per-conversation ring
+  (`ReplaySince`/`CanReplay`), bounded FIFO dedupe by `global_seq` for
+  at-least-once collapse; the frame handler shares the buffer.
+- **Connection lifecycle** - `onClose` hook; presence `Connect` on upgrade
+  and `Disconnect` (+ typing cleanup on the last device) on teardown.
+
+#### Changed
+- `typing.stop` is exempt from the wire `ws_typing` budget (a stop must
+  always land so indicators clear); `typing.start` stays throttled.
+- The access-log `statusRecorder` now forwards `http.Hijacker`/`Flusher`/
+  `ReaderFrom`, so a WebSocket upgrade works behind the middleware chain.
+- `NewDispatcher` takes the shared `replayBuffer` (exported via
+  `NewReplayBuffer`); `supervise` restarts the dispatcher and session-revoke
+  watcher with bounded backoff on unexpected exits.
+
+#### Fixed
+- WebSocket upgrades previously returned 501 behind the access-log middleware
+  (missing `http.Hijacker` forwarding) - the gateway now upgrades correctly.
+
 ### Sprint 2 - Core Messaging (milestone 3: realtime WebSocket gateway, outbox relay, and dispatcher)
 
 #### Added
