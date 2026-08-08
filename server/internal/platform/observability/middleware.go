@@ -1,9 +1,13 @@
 package observability
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -42,7 +46,11 @@ func AccessLog(log *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// statusRecorder captures the response status code for the access log.
+// statusRecorder captures the response status code for the access log. It must
+// forward the optional-response-writer interfaces the underlying writer
+// implements — notably http.Hijacker, without which a WebSocket upgrade behind
+// the middleware chain fails (coder/websocket Accept requires it, DEVOPS.md §8
+// e2e). http.Flusher and io.ReaderFrom are forwarded for the same reason.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -52,6 +60,31 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack forwards to the underlying writer so hijacking handlers (the
+// realtime WebSocket gateway) keep working when wrapped by the access log.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("observability: underlying ResponseWriter is not an http.Hijacker")
+	}
+	return hj.Hijack()
+}
+
+// Flush forwards buffered output (streaming handlers).
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// ReadFrom forwards efficient copy for io.Copy callers.
+func (r *statusRecorder) ReadFrom(src io.Reader) (int64, error) {
+	if rf, ok := r.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(src)
+	}
+	return io.Copy(r.ResponseWriter, src)
 }
 
 func newRequestID() string {
